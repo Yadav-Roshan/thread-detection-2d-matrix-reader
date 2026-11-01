@@ -47,6 +47,7 @@ def test_offline_go_without_rois(client):
     assert body["thread_result"]["state"] == "PRESENT"
     assert body["code_image"].startswith("data:image/jpeg;base64,")
     assert body["operator"] == "tester" and body["mode"] == "offline"
+    assert isinstance(body["elapsed_ms"], int) and 0 < body["elapsed_ms"] < 30_000
 
 
 def test_offline_no_thread_is_no_go_and_recorded(client):

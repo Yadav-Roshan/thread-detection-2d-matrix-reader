@@ -31,7 +31,7 @@ and restored at startup.
 ## Latest result images
 
 Every run overwrites one annotated image per camera beside the app:
-`result_images\2D-Code\code_result.jpg` and `result_images\Thread\thread_result.jpg` (no history kept).
+`result_images\code_result.jpg` and `result_images\thread_result.jpg` (no history kept). The folder can be changed in SETUP → Reports.
 
 ## Hercules (station = TCP server, Hercules = client)
 

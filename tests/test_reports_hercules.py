@@ -141,6 +141,7 @@ def test_hercules_full_protocol_over_tcp(client, tmp_path, monkeypatch):
         assert conn.ask("threadpresence") == "threadok"
         event = client.get("/api/hercules/status").json()["last_event"]
         assert event["kind"] == "thread" and event["reply"] == "threadok"
+        assert event["result"]["elapsed_ms"] > 0
         assert event["result"]["overall_result"] == "GO" and event["result"]["decoded_number"] == EXPECTED
         assert (tmp_path / event["result"]["report_id"]).is_file()
 
@@ -201,17 +202,30 @@ def test_hercules_port_in_use_reports_error():
     assert status["listening"] is False and "Listen failed" in status["last_error"]
 
 
-def test_result_images_overwritten_each_run(client):
+def test_result_images_overwritten_each_run(client, tmp_path):
     from src.core import config
-    code_file = config.RESULT_IMAGES_DIR / "2D-Code" / "code_result.jpg"
-    thread_file = config.RESULT_IMAGES_DIR / "Thread" / "thread_result.jpg"
+    folder = config.RESULT_IMAGES_DIR
+    client.post("/api/result-images/set-directory", json={"directory": None})
     client.post("/api/inspect/offline", files=_files(CODE, THREAD))
+    code_file, thread_file = folder / "code_result.jpg", folder / "thread_result.jpg"
     assert code_file.is_file() and thread_file.is_file()
-    first = (code_file.stat().st_mtime_ns, thread_file.read_bytes())
+    first = thread_file.read_bytes()
     client.post("/api/inspect/offline", files=_files(CODE, NO_THREAD))
-    assert code_file.stat().st_mtime_ns >= first[0] and thread_file.read_bytes() != first[1]
-    for folder in (code_file.parent, thread_file.parent):     # exactly one file per camera, no temp leftovers
-        assert [f.name for f in folder.iterdir()] == [folder.joinpath(
-            "code_result.jpg" if folder.name == "2D-Code" else "thread_result.jpg").name]
+    assert thread_file.read_bytes() != first
+    assert sorted(f.name for f in folder.iterdir()) == ["code_result.jpg", "thread_result.jpg"]
     image = cv2.imread(str(thread_file))
     assert image is not None and image.shape[:2] == cv2.imread(str(NO_THREAD)).shape[:2]
+
+
+def test_result_images_directory_setting(client, tmp_path):
+    current = client.get("/api/result-images/directory").json()
+    assert current["directory"] == current["default"]
+    custom = tmp_path / "results here"
+    assert client.post("/api/result-images/set-directory", json={"directory": str(custom)}).json()["success"]
+    assert client.get("/api/result-images/directory").json()["directory"] == str(custom)
+    client.post("/api/inspect/offline", files=_files(CODE, THREAD))
+    assert sorted(f.name for f in custom.iterdir()) == ["code_result.jpg", "thread_result.jpg"]
+    # report folder setting is independent and kept
+    assert client.get("/api/report/directory").json()["directory"]
+    assert client.post("/api/result-images/set-directory", json={"directory": "relative"}).status_code == 400
+    assert client.post("/api/result-images/set-directory", json={"directory": None}).json()["directory"] == current["default"]

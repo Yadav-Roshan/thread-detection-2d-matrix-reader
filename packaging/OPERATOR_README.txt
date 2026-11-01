@@ -22,7 +22,7 @@ FOLDERS CREATED BESIDE THE EXE
   reports\  default PDF report folder
   logs\     station.log (send this file when reporting a problem)
   frames\   frames saved with the save button on a feed
-  result_images\2D-Code\code_result.jpg   latest annotated 2D-code image (overwritten every run)
-  result_images\Thread\thread_result.jpg   latest annotated thread image (overwritten every run)
+  result_images\code_result.jpg   latest annotated 2D-code image (overwritten every run)
+  result_images\thread_result.jpg   latest annotated thread image (overwritten every run)
 
 Optional .env beside the exe: PORT=8000, HOST=127.0.0.1, OPEN_BROWSER=1, CAMERA_PROBE_MAX=6

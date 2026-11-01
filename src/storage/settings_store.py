@@ -96,15 +96,12 @@ class SettingsStore:
             _write(self.dir / "cameras.json", {role: active.get(role) for role in ("code", "thread")})
 
     # Report directory (PDFs: <dir>/<YYYY>/<MM>/<DD>/<GO|NO_GO>/...)
-    def get_report_directory(self) -> Path:
-        value = _read(self.dir / "report_config.json", {}).get("output_directory")
-        return Path(value) if value else Path(config.PDF_DIR)
-
-    def set_report_directory(self, directory: str | None) -> Path:
+    @staticmethod
+    def _validate_directory(directory: str | None, default: Path, what: str) -> tuple[Path, bool]:
         text = (directory or "").strip().strip('"')
-        path = Path(text).expanduser() if text else Path(config.PDF_DIR)
+        path = Path(text).expanduser() if text else Path(default)
         if text and not path.is_absolute():
-            raise ValueError("Report directory must be an absolute path, e.g. D:/Reports")
+            raise ValueError(f"{what} must be an absolute path, e.g. D:/Reports")
         try:
             path.mkdir(parents=True, exist_ok=True)
             probe = path / ".write_test"
@@ -112,8 +109,31 @@ class SettingsStore:
             probe.unlink()
         except OSError as exc:
             raise ValueError(f"Cannot write to {path}: {exc.strerror or exc}") from exc
+        return path, bool(text)
+
+    def get_report_directory(self) -> Path:
+        value = _read(self.dir / "report_config.json", {}).get("output_directory")
+        return Path(value) if value else Path(config.PDF_DIR)
+
+    def set_report_directory(self, directory: str | None) -> Path:
+        path, custom = self._validate_directory(directory, config.PDF_DIR, "Report directory")
         with _lock:
-            _write(self.dir / "report_config.json", {"output_directory": str(path) if text else None})
+            data = _read(self.dir / "report_config.json", {})
+            data["output_directory"] = str(path) if custom else None
+            _write(self.dir / "report_config.json", data)
+        return path
+
+    # Result images folder (latest code_result.jpg + thread_result.jpg, overwritten every run)
+    def get_result_images_directory(self) -> Path:
+        value = _read(self.dir / "report_config.json", {}).get("result_images_directory")
+        return Path(value) if value else Path(config.RESULT_IMAGES_DIR)
+
+    def set_result_images_directory(self, directory: str | None) -> Path:
+        path, custom = self._validate_directory(directory, config.RESULT_IMAGES_DIR, "Result images folder")
+        with _lock:
+            data = _read(self.dir / "report_config.json", {})
+            data["result_images_directory"] = str(path) if custom else None
+            _write(self.dir / "report_config.json", data)
         return path
 
     # Hercules link

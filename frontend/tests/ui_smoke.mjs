@@ -52,6 +52,7 @@ const result = (mode, overrides = {}) => {
     thread_result: threadPresent,
     code_image: dataUrl(codeImage),
     thread_image: dataUrl(threadImage),
+    elapsed_ms: 1234,
     ...overrides,
   };
   r.report_id = reportId(r.overall_result);
@@ -80,6 +81,7 @@ const state = {
   offlineCalls: 0,
   posted: {},
   reportDir: 'D:\\Reports\\CamShaft',
+  resultDir: 'C:\\CamShaft\\result_images',
   hercules: {
     enabled: true, listening: true, bind_host: '0.0.0.0', port: 9000,
     client_connected: false, client_addr: null, last_error: null,
@@ -124,6 +126,14 @@ async function handleApi(route) {
     if (b.directory && !/^[A-Za-z]:\\/.test(b.directory)) return json({ detail: 'Report folder must be an absolute path' }, 400);
     state.reportDir = b.directory ?? 'C:\\CamShaft\\reports\\pdf';
     return json({ success: true, directory: state.reportDir });
+  }
+  if (path === '/api/result-images/directory') return json({ directory: state.resultDir, default: 'C:\\CamShaft\\result_images', files: ['code_result.jpg', 'thread_result.jpg'] });
+  if (path === '/api/result-images/browse-directory') return json({ directory: 'F:\\Results' });
+  if (path === '/api/result-images/set-directory') {
+    const b = body();
+    state.posted.resultDirs = [...(state.posted.resultDirs || []), b.directory];
+    state.resultDir = b.directory ?? 'C:\\CamShaft\\result_images';
+    return json({ success: true, directory: state.resultDir });
   }
   if (path === '/api/reports') return json(reports);
   if (path.startsWith('/api/reports/by-part/')) return json(reports.filter((r) => r.decoded_number === decodeURIComponent(path.split('/').pop())));
@@ -187,6 +197,7 @@ try {
   await overlay.getByText('GO', { exact: true }).waitFor();
   await page.getByTestId('last-part').getByText(DECODED).waitFor();
   await page.getByTestId('results').getByText(/Thread:\s*PRESENT/).waitFor();
+  await page.getByTestId('results').getByTestId('inspection-time').getByText('1.23 s', { exact: false }).waitFor();
   const pdfLink = page.getByTestId('results').getByRole('link', { name: 'Open inspection report (PDF)' });
   check((await pdfLink.getAttribute('href')) === reportUrl(reportId('GO')), 'results PDF link href mismatch');
   check((await pdfLink.getAttribute('target')) === '_blank', 'PDF link must open a new tab');
@@ -299,7 +310,7 @@ try {
   const dirInput = page.locator('#report-dir');
   await page.waitForFunction(() => document.querySelector('#report-dir')?.value === 'D:\\Reports\\CamShaft');
   await page.getByText('<folder>\\YYYY\\MM\\DD\\GO|NO_GO\\<part>_<HHMMSS>.pdf', { exact: false }).waitFor();
-  await page.getByRole('button', { name: 'Browse…' }).click();
+  await page.getByTestId('report-folder').getByRole('button', { name: 'Browse…' }).click();
   await page.waitForFunction(() => document.querySelector('#report-dir')?.value === 'E:\\Picked\\Folder');
   const folder = page.getByTestId('report-folder');
   await folder.getByRole('button', { name: 'Save', exact: true }).click();
@@ -312,6 +323,21 @@ try {
   await folder.getByRole('button', { name: 'Use default' }).click();
   await page.getByRole('heading', { name: 'Report folder saved' }).waitFor();
   check(state.posted.reportDirs.at(-1) === null, 'Use default must save null');
+  await page.getByRole('button', { name: 'OK' }).click();
+
+  // Result images folder (same controls as the report folder)
+  const resFolder = page.getByTestId('result-images-folder');
+  await page.waitForFunction(() => document.querySelector('#result-dir')?.value === 'C:\\CamShaft\\result_images');
+  await resFolder.getByText('code_result.jpg and thread_result.jpg', { exact: false }).waitFor();
+  await resFolder.getByRole('button', { name: 'Browse…' }).click();
+  await page.waitForFunction(() => document.querySelector('#result-dir')?.value === 'F:\\Results');
+  await resFolder.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.getByRole('heading', { name: 'Result images folder saved' }).waitFor();
+  check(state.posted.resultDirs.at(-1) === 'F:\\Results', 'result images folder save body mismatch');
+  await page.getByRole('button', { name: 'OK' }).click();
+  await resFolder.getByRole('button', { name: 'Use default' }).click();
+  await page.getByRole('heading', { name: 'Result images folder saved' }).waitFor();
+  check(state.posted.resultDirs.at(-1) === null, 'result images Use default must save null');
   await page.getByRole('button', { name: 'OK' }).click();
 
   const recent = page.getByTestId('recent-reports');

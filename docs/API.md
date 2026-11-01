@@ -91,6 +91,16 @@ The report directory is chosen in SETUP → Reports.
 
 `ReportRecord`: `{ report_id, timestamp, decoded_number (null if unread), overall_result, report_url }`
 
+## Result images folder
+
+The latest annotated images are overwritten on every run as `<folder>/code_result.jpg` and `<folder>/thread_result.jpg`.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/result-images/directory` | – | `{ directory, default, files }` |
+| POST | `/api/result-images/set-directory` | `{ directory: str \| null }` (null = default) | `{ success, directory }` · 400 with `detail` |
+| POST | `/api/result-images/browse-directory` | – | `{ directory: str \| null }` (native picker on the station PC; does not save) |
+
 ## Hercules (TCP server; Hercules connects as client)
 
 | Method | Path | Body | Response |

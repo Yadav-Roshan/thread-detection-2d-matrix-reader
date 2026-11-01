@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -210,13 +211,13 @@ def _rois_for(frame: np.ndarray, role: str):
     return clamp_roi(roi, frame.shape[1], frame.shape[0])
 
 
-_RESULT_FILES = {"code": ("2D-Code", "code_result.jpg"), "thread": ("Thread", "thread_result.jpg")}
+_RESULT_FILES = {"code": "code_result.jpg", "thread": "thread_result.jpg"}
 
 
 def _save_result_image(role: str, image: np.ndarray) -> None:
     """Overwrite the single latest annotated result image for this camera (atomic replace)."""
-    folder_name, filename = _RESULT_FILES[role]
-    folder = config.RESULT_IMAGES_DIR / folder_name
+    filename = _RESULT_FILES[role]
+    folder = State.settings.get_result_images_directory()
     try:
         folder.mkdir(parents=True, exist_ok=True)
         ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -246,9 +247,10 @@ def _write_report(code: Optional[CodeStep], thread, operator: str, mode: str, ti
 
 
 def _payload(code: Optional[CodeStep], thread, operator: str, mode: str, timestamp: datetime,
-             report_id: Optional[str]) -> dict:
+             report_id: Optional[str], elapsed_ms: Optional[int] = None) -> dict:
     return {
         "timestamp": timestamp.astimezone(timezone.utc).isoformat(),
+        "elapsed_ms": elapsed_ms,
         "operator": operator,
         "mode": mode,
         "overall_result": overall(code, thread),
@@ -262,7 +264,14 @@ def _payload(code: Optional[CodeStep], thread, operator: str, mode: str, timesta
     }
 
 
-def _run_inspection(code_frame: np.ndarray, thread_frame: np.ndarray, operator: str, mode: str) -> dict:
+def _elapsed_ms(start: float) -> int:
+    return int(round((time.perf_counter() - start) * 1000))
+
+
+def _run_inspection(code_frame: np.ndarray, thread_frame: np.ndarray, operator: str, mode: str,
+                    started: Optional[float] = None) -> dict:
+    """``started`` = perf_counter() when the inspection began (frame capture for live checks)."""
+    started = started if started is not None else time.perf_counter()
     with State.inspect_lock:
         try:
             code = run_code_step(code_frame, _rois_for(code_frame, "code"))
@@ -274,21 +283,23 @@ def _run_inspection(code_frame: np.ndarray, thread_frame: np.ndarray, operator: 
         _save_result_image("thread", thread.image)
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, operator, mode, now)
+    elapsed = _elapsed_ms(started)
     logging.getLogger("station.inspect").info(
-        "%s check: part=%s code=%s thread=%s -> %s report=%s", mode, code.decoded_number,
-        "OK" if code.result["passed"] else "NOREAD", thread.result["state"], overall(code, thread), report_id)
-    return _payload(code, thread, operator, mode, now, report_id)
+        "%s check: part=%s code=%s thread=%s -> %s report=%s time=%dms", mode, code.decoded_number,
+        "OK" if code.result["passed"] else "NOREAD", thread.result["state"], overall(code, thread), report_id, elapsed)
+    return _payload(code, thread, operator, mode, now, report_id, elapsed)
 
 
 @router.post("/api/inspect")
 def inspect_online(body: InspectRequest) -> dict:
+    started = time.perf_counter()
     code_frame = State.cameras.frame("code")
     thread_frame = State.cameras.averaged_frame("thread")  # 3-frame mean for repeatability
     missing = [name for name, frame in (("2D code", code_frame), ("thread", thread_frame)) if frame is None]
     if missing:
         raise HTTPException(status_code=503,
                             detail=" and ".join(missing) + " camera not connected — select it on the feed")
-    return _run_inspection(code_frame, thread_frame, body.operator, "online")
+    return _run_inspection(code_frame, thread_frame, body.operator, "online", started)
 
 
 def _decode_upload(raw: bytes, name: str) -> np.ndarray:
@@ -306,9 +317,10 @@ async def inspect_offline(
     thread_image: UploadFile = File(...),
     operator: str = Form(""),
 ) -> dict:
+    started = time.perf_counter()
     code_frame = _decode_upload(await code_image.read(), "2D code image")
     thread_frame = _decode_upload(await thread_image.read(), "Thread image")
-    return await run_in_threadpool(_run_inspection, code_frame, thread_frame, operator, "offline")
+    return await run_in_threadpool(_run_inspection, code_frame, thread_frame, operator, "offline", started)
 
 
 # ------------------------------------------------------------------ hercules handlers
@@ -318,6 +330,7 @@ def hercules_ready() -> bool:
 
 def hercules_scan() -> tuple[str, dict]:
     cfg = State.hercules.config
+    started = time.perf_counter()
     frame = State.cameras.frame("code")
     if frame is None:
         raise RuntimeError("2D code camera not connected")
@@ -326,7 +339,8 @@ def hercules_scan() -> tuple[str, dict]:
         _save_result_image("code", code.image)
     State.last_scan = code
     reply = code.decoded_number if code.result["passed"] else cfg["scan_fail_reply"]
-    result = {"timestamp": datetime.now(timezone.utc).isoformat(), "mode": "hercules", "operator": "Hercules",
+    result = {"timestamp": datetime.now(timezone.utc).isoformat(), "elapsed_ms": _elapsed_ms(started),
+              "mode": "hercules", "operator": "Hercules",
               "decoded_number": code.decoded_number, "code_result": code.result,
               "code_image": to_data_url(code.image)}
     return reply, result
@@ -334,6 +348,7 @@ def hercules_scan() -> tuple[str, dict]:
 
 def hercules_thread() -> tuple[str, dict]:
     cfg = State.hercules.config
+    started = time.perf_counter()
     frame = State.cameras.averaged_frame("thread")
     if frame is None:
         raise RuntimeError("Thread camera not connected")
@@ -344,7 +359,7 @@ def hercules_thread() -> tuple[str, dict]:
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, "Hercules", "hercules", now)
     reply = cfg["thread_ok_reply"] if thread.passed else cfg["thread_nok_reply"]
-    return reply, _payload(code, thread, "Hercules", "hercules", now, report_id)
+    return reply, _payload(code, thread, "Hercules", "hercules", now, report_id, _elapsed_ms(started))
 
 
 State.hercules.set_handlers(ready=hercules_ready, scan=hercules_scan, thread=hercules_thread)
@@ -389,7 +404,7 @@ def set_report_directory(body: DirectoryRequest) -> dict:
     return {"success": True, "directory": str(path)}
 
 
-def _browse_folder(initial: str) -> Optional[str]:
+def _browse_folder(initial: str, title: str = "Select report folder") -> Optional[str]:
     import tkinter
     from tkinter import filedialog
     root = tkinter.Tk()
@@ -397,7 +412,7 @@ def _browse_folder(initial: str) -> Optional[str]:
     root.attributes("-topmost", True)
     try:
         chosen = filedialog.askdirectory(parent=root, initialdir=initial, mustexist=False,
-                                         title="Select report folder")
+                                         title=title)
     finally:
         root.destroy()
     return chosen or None
@@ -432,3 +447,30 @@ def report_file(report_id: str):
         raise HTTPException(status_code=404, detail="Report not found") from exc
     return FileResponse(path, media_type="application/pdf", filename=path.name,
                         content_disposition_type="inline")
+
+
+# ------------------------------------------------------------------ result images folder
+@router.get("/api/result-images/directory")
+def get_result_images_directory() -> dict:
+    return {"directory": str(State.settings.get_result_images_directory()),
+            "default": str(config.RESULT_IMAGES_DIR),
+            "files": list(_RESULT_FILES.values())}
+
+
+@router.post("/api/result-images/set-directory")
+def set_result_images_directory(body: DirectoryRequest) -> dict:
+    try:
+        path = State.settings.set_result_images_directory(body.directory)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"success": True, "directory": str(path)}
+
+
+@router.post("/api/result-images/browse-directory")
+def browse_result_images_directory() -> dict:
+    try:
+        chosen = _browse_folder(str(State.settings.get_result_images_directory()), "Select result images folder")
+    except Exception as exc:
+        raise HTTPException(status_code=501,
+                            detail=f"Folder picker unavailable here, type the path instead ({exc})") from exc
+    return {"directory": chosen}

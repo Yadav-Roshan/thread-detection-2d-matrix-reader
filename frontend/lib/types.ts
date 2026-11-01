@@ -43,6 +43,7 @@ export type InspectionResult = {
   thread_image?: string | null;
   report_id?: string | null;
   report_url?: string | null;
+  elapsed_ms?: number | null;
 };
 
 export type ReportRecord = {

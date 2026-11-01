@@ -20,6 +20,7 @@ import {
   Trash2,
   X,
   XCircle,
+  Timer,
 } from 'lucide-react';
 import { apiJson, apiUrl, postJson } from '@/lib/api';
 import type {
@@ -163,6 +164,7 @@ type ResultView = {
   report_id: string | null;
   code_image: string | null;
   thread_image: string | null;
+  elapsed_ms: number | null;
 };
 
 function viewFromResult(r: InspectionResult | HerculesEventResult, partialScan = false): ResultView {
@@ -176,7 +178,12 @@ function viewFromResult(r: InspectionResult | HerculesEventResult, partialScan =
     report_id: partialScan ? null : r.report_id ?? null,
     code_image: r.code_image ?? null,
     thread_image: partialScan ? null : r.thread_image ?? null,
+    elapsed_ms: r.elapsed_ms ?? null,
   };
+}
+
+function formatElapsed(ms: number): string {
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
 }
 
 function formatTimestamp(iso: string): string {
@@ -279,6 +286,12 @@ export default function Home() {
   const [reportDirSaveState, setReportDirSaveState] = useState<SaveState>('idle');
   const [reportDirError, setReportDirError] = useState('');
   const [showReportDirSaved, setShowReportDirSaved] = useState(false);
+  const [resultDir, setResultDir] = useState('');
+  const [resultDirDefault, setResultDirDefault] = useState('');
+  const [resultBrowseBusy, setResultBrowseBusy] = useState(false);
+  const [resultDirSaveState, setResultDirSaveState] = useState<SaveState>('idle');
+  const [resultDirError, setResultDirError] = useState('');
+  const [showResultDirSaved, setShowResultDirSaved] = useState(false);
 
   // Auth
   const [showAuthDialog, setShowAuthDialog] = useState(false);
@@ -363,12 +376,23 @@ export default function Home() {
     }
   }, []);
 
+  const loadResultDir = useCallback(async () => {
+    try {
+      const data = await apiJson<{ directory: string | null; default?: string | null }>('/api/result-images/directory');
+      setResultDir(data.directory ?? '');
+      setResultDirDefault(data.default ?? '');
+    } catch (e) {
+      setResultDirError((e as Error).message);
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'setup' && setupLeftPanel === 'reports') {
       void loadRecentReports();
       void loadReportDir();
+      void loadResultDir();
     }
-  }, [activeTab, setupLeftPanel, loadRecentReports, loadReportDir]);
+  }, [activeTab, setupLeftPanel, loadRecentReports, loadReportDir, loadResultDir]);
 
   useEffect(() => {
     return () => {
@@ -541,6 +565,7 @@ export default function Home() {
     showParamsSavedDialog ||
     showPasswordChanged ||
     showReportDirSaved ||
+    showResultDirSaved ||
     savedFrame !== null;
 
   const runInspectRef = useRef(runInspect);
@@ -739,6 +764,39 @@ export default function Home() {
     }
   };
 
+  const browseResultDir = async () => {
+    setResultBrowseBusy(true);
+    setResultDirError('');
+    try {
+      const data = await postJson<{ directory: string | null }>('/api/result-images/browse-directory', {});
+      if (data.directory) setResultDir(data.directory);
+    } catch (e) {
+      setResultDirError((e as Error).message);
+    } finally {
+      setResultBrowseBusy(false);
+    }
+  };
+
+  const saveResultDir = async (directory: string | null) => {
+    setResultDirSaveState('saving');
+    setResultDirError('');
+    try {
+      const data = await postJson<{ success: boolean; directory: string | null; message?: string }>(
+        '/api/result-images/set-directory',
+        { directory }
+      );
+      if (!data.success) throw new Error(data.message || 'Failed to save result images folder');
+      setResultDir(data.directory ?? '');
+      setResultDirSaveState('saved');
+      setShowResultDirSaved(true);
+      window.setTimeout(() => setResultDirSaveState('idle'), 2500);
+    } catch (e) {
+      setResultDirSaveState('error');
+      setResultDirError((e as Error).message);
+      window.setTimeout(() => setResultDirSaveState('idle'), 3000);
+    }
+  };
+
   const lookupReports = async () => {
     const part = reportPart.trim();
     if (!part) return;
@@ -903,6 +961,12 @@ export default function Home() {
           ) : (
             <p className="text-sm text-muted-foreground">
               <span className="font-semibold text-slate-700">Thread:</span> waiting for thread check…
+            </p>
+          )}
+          {typeof view.elapsed_ms === 'number' && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground" data-testid="inspection-time">
+              <Timer className="h-4 w-4 text-teal-600" />
+              <span className="font-semibold text-slate-700">Inspection time:</span> {formatElapsed(view.elapsed_ms)}
             </p>
           )}
         </div>
@@ -1369,6 +1433,49 @@ export default function Home() {
                       Saved as {REPORT_STRUCTURE}
                     </p>
                   </div>
+                  <div className="space-y-2 border-b border-slate-200 pb-4" data-testid="result-images-folder">
+                    <Label htmlFor="result-dir">Result images folder</Label>
+                    <Input
+                      id="result-dir"
+                      className="h-10 font-mono text-xs"
+                      placeholder={resultDirDefault || 'Default result images folder'}
+                      value={resultDir}
+                      onChange={(e) => setResultDir(e.target.value)}
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        className="flex-1"
+                        disabled={resultBrowseBusy}
+                        onClick={() => void browseResultDir()}
+                      >
+                        {resultBrowseBusy ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <FolderOpen className="mr-2 h-4 w-4" />
+                        )}
+                        Browse…
+                      </Button>
+                      <div className="flex-1">
+                        <SaveButton
+                          state={resultDirSaveState}
+                          label="Save"
+                          onClick={() => void saveResultDir(resultDir.trim() || null)}
+                        />
+                      </div>
+                    </div>
+                    {resultDirError && <p className="text-xs text-red-600">{resultDirError}</p>}
+                    <button
+                      type="button"
+                      className="text-xs font-semibold text-teal-600 underline hover:text-teal-800"
+                      onClick={() => void saveResultDir(null)}
+                    >
+                      Use default
+                    </button>
+                    <p className="break-all text-xs text-muted-foreground">
+                      Latest annotated images, overwritten every run: code_result.jpg and thread_result.jpg
+                    </p>
+                  </div>
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Report lookup</p>
                     <p className="mt-1 text-xs text-muted-foreground">
@@ -1665,6 +1772,11 @@ export default function Home() {
       <SuccessDialog open={showReportDirSaved} onOpenChange={setShowReportDirSaved} title="Report folder saved">
         <p>New PDF reports will be saved to:</p>
         <p className="mt-1 break-all font-mono text-xs">{reportDir || reportDirDefault || 'the default folder'}</p>
+      </SuccessDialog>
+
+      <SuccessDialog open={showResultDirSaved} onOpenChange={setShowResultDirSaved} title="Result images folder saved">
+        <p>The latest result images will be saved to:</p>
+        <p className="mt-1 break-all font-mono text-xs">{resultDir || resultDirDefault || 'the default folder'}</p>
       </SuccessDialog>
 
       <SuccessDialog open={showPasswordChanged} onOpenChange={setShowPasswordChanged} title="Password updated">
