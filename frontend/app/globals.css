@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Teal accent (not blue) for shop-floor UI */
+    --background: 166 30% 98%;
+    --foreground: 168 30% 8%;
+    --card: 0 0% 100%;
+    --card-foreground: 168 30% 8%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 168 30% 8%;
+    --primary: 175 84% 32%;
+    --primary-foreground: 166 40% 98%;
+    --secondary: 170 30% 94%;
+    --secondary-foreground: 175 40% 16%;
+    --muted: 170 25% 94%;
+    --muted-foreground: 170 12% 40%;
+    --accent: 170 30% 94%;
+    --accent-foreground: 175 40% 16%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 166 40% 98%;
+    --border: 170 20% 88%;
+    --input: 170 20% 88%;
+    --ring: 175 84% 32%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+}

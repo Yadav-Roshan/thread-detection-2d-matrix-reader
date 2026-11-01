@@ -1,0 +1,32 @@
+[project]
+name = "thread-detection-2d-matrix-read"
+version = "1.0.0"
+description = "2D Matrix Reader & Thread Presence Inspection station (FastAPI + OpenCV + Next.js)"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "python-multipart>=0.0.12",
+  "opencv-python-headless>=4.10",
+  "zxing-cpp>=3.1",
+  "numpy>=2.0",
+  "scikit-learn>=1.5",
+  "joblib>=1.4",
+  "reportlab>=4.2",
+]
+
+[dependency-groups]
+build = [
+  "pyinstaller>=6.10",
+]
+dev = [
+  "pytest>=8.0",
+  "httpx2>=0.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[project.scripts]
+thread-inspection = "main:run_application"
