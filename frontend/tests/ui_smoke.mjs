@@ -186,7 +186,7 @@ try {
   const overlay = page.getByTestId('feed-overlay');
   await overlay.getByText('GO', { exact: true }).waitFor();
   await page.getByTestId('last-part').getByText(DECODED).waitFor();
-  await page.getByTestId('results').getByText(/PRESENT · 97%/).waitFor();
+  await page.getByTestId('results').getByText(/Thread:\s*PRESENT/).waitFor();
   const pdfLink = page.getByTestId('results').getByRole('link', { name: 'Open inspection report (PDF)' });
   check((await pdfLink.getAttribute('href')) === reportUrl(reportId('GO')), 'results PDF link href mismatch');
   check((await pdfLink.getAttribute('target')) === '_blank', 'PDF link must open a new tab');
@@ -213,7 +213,7 @@ try {
   };
   await overlay.getByText('NO-GO', { exact: true }).waitFor();
   check((await overlay.getByRole('link', { name: 'Open report PDF' }).getAttribute('href')) === reportUrl(reportId('NO_GO')), 'overlay PDF link mismatch');
-  await page.getByTestId('results').getByText(/NOT VISIBLE · 20%/).waitFor();
+  await page.getByTestId('results').getByText(/Thread:\s*NOT VISIBLE/).waitFor();
   await page.getByText('Thread not visible — move the camera closer / remove obstruction').waitFor();
   await shot(page, '2-hercules-nogo');
 
@@ -239,7 +239,7 @@ try {
   check((await page.getByLabel('2D Code cam').count()) === 0, 'camera select hidden while uploaded image shown');
   await runOffline.click();
   const offResults = page.getByTestId('offline-results');
-  await offResults.getByText(/PRESENT · 97%/).waitFor();
+  await offResults.getByText(/Thread:\s*PRESENT/).waitFor();
   await overlay.getByText('GO', { exact: true }).waitFor();
   check((await offResults.getByRole('link', { name: 'Open inspection report (PDF)' }).getAttribute('href')) === reportUrl(reportId('GO')), 'offline PDF link mismatch');
   await page.getByTestId('feed-thread').locator('img[src^="data:image/jpeg"]').waitFor();
@@ -248,7 +248,7 @@ try {
   await page.getByTestId('feed-thread').locator('img[src^="blob:"]').waitFor();
   await runOffline.click();
   await overlay.getByText('NO-GO', { exact: true }).waitFor();
-  await offResults.getByText(/NOT VISIBLE · 20%/).waitFor();
+  await offResults.getByText(/Thread:\s*NOT VISIBLE/).waitFor();
   await offResults.getByText('Thread not visible — move the camera closer / remove obstruction').waitFor();
 
   // ---- ROIs: draw on the uploaded thread image, save, clear → null

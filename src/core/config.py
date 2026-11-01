@@ -44,6 +44,8 @@ MODEL_SAVE_PATH = _path("THREAD_MODEL_PATH", _LOCAL_MODEL)
 PDF_DIR = _path("THREAD_PDF_DIR", BASE_DIR / "reports" / "pdf")
 ASSETS_DIR = RESOURCE_DIR / "assets"
 FRAMES_DIR = _path("THREAD_FRAMES_DIR", BASE_DIR / "frames")
+# Latest annotated result image per camera, overwritten on every run.
+RESULT_IMAGES_DIR = _path("THREAD_RESULT_IMAGES_DIR", BASE_DIR / "result_images")
 FRONTEND_OUT = RESOURCE_DIR / "frontend" / "out"
 LOG_DIR = _path("THREAD_LOG_DIR", BASE_DIR / "logs")
 OPEN_BROWSER = os.getenv("OPEN_BROWSER", "1" if FROZEN else "0") == "1"

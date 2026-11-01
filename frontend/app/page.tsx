@@ -96,7 +96,7 @@ const DETECTION_FIELDS: ParamField[] = [
     label: 'Min classifier margin',
     step: 0.05,
     integer: false,
-    help: 'Classifier confidence margin needed for PRESENT.',
+    help: 'Classifier margin needed for PRESENT. Raise to be stricter.',
   },
   {
     key: 'max_novelty',
@@ -188,12 +188,6 @@ function formatTimestamp(iso: string): string {
 function threadStateLabel(state: string | null | undefined): string {
   if (!state) return '—';
   return state === 'NOT_VISIBLE' ? 'NOT VISIBLE' : state;
-}
-
-function formatConfidence(c: number | null | undefined): string {
-  if (c === null || c === undefined || Number.isNaN(c)) return '—';
-  const pct = c <= 1 ? c * 100 : c;
-  return `${Math.round(pct)}%`;
 }
 
 function noGoReason(v: ResultView): string | null {
@@ -903,8 +897,7 @@ export default function Home() {
           )}
           {view.thread ? (
             <p className="text-sm text-muted-foreground">
-              <span className="font-semibold text-slate-700">Thread:</span> {threadStateLabel(view.thread.state)} ·{' '}
-              {formatConfidence(view.thread.confidence)}
+              <span className="font-semibold text-slate-700">Thread:</span> {threadStateLabel(view.thread.state)}
               {view.thread.message ? ` — ${view.thread.message}` : ''}
             </p>
           ) : (

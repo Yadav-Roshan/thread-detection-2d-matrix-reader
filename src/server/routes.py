@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from typing import Optional
@@ -209,6 +210,25 @@ def _rois_for(frame: np.ndarray, role: str):
     return clamp_roi(roi, frame.shape[1], frame.shape[0])
 
 
+_RESULT_FILES = {"code": ("2D-Code", "code_result.jpg"), "thread": ("Thread", "thread_result.jpg")}
+
+
+def _save_result_image(role: str, image: np.ndarray) -> None:
+    """Overwrite the single latest annotated result image for this camera (atomic replace)."""
+    folder_name, filename = _RESULT_FILES[role]
+    folder = config.RESULT_IMAGES_DIR / folder_name
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            raise RuntimeError("JPEG encoding failed")
+        tmp = folder / (filename + ".tmp")
+        tmp.write_bytes(buf.tobytes())
+        os.replace(tmp, folder / filename)
+    except Exception as exc:  # never block the line because of a result image
+        logging.getLogger("station.results").warning("Could not save %s result image: %s", role, exc)
+
+
 _NOT_SCANNED = {"passed": False, "text": None, "format": None, "message": "2D code not scanned before thread check"}
 
 
@@ -250,6 +270,8 @@ def _run_inspection(code_frame: np.ndarray, thread_frame: np.ndarray, operator: 
                                      get_classifier(), State.settings.get_detection())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _save_result_image("code", code.image)
+        _save_result_image("thread", thread.image)
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, operator, mode, now)
     logging.getLogger("station.inspect").info(
@@ -301,6 +323,7 @@ def hercules_scan() -> tuple[str, dict]:
         raise RuntimeError("2D code camera not connected")
     with State.inspect_lock:
         code = run_code_step(frame, _rois_for(frame, "code"))
+        _save_result_image("code", code.image)
     State.last_scan = code
     reply = code.decoded_number if code.result["passed"] else cfg["scan_fail_reply"]
     result = {"timestamp": datetime.now(timezone.utc).isoformat(), "mode": "hercules", "operator": "Hercules",
@@ -316,6 +339,7 @@ def hercules_thread() -> tuple[str, dict]:
         raise RuntimeError("Thread camera not connected")
     with State.inspect_lock:
         thread = run_thread_step(frame, _rois_for(frame, "thread"), get_classifier(), State.settings.get_detection())
+        _save_result_image("thread", thread.image)
         code, State.last_scan = State.last_scan, None   # one scan pairs with one thread check
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, "Hercules", "hercules", now)

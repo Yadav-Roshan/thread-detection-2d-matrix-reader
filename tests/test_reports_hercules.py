@@ -199,3 +199,19 @@ def test_hercules_port_in_use_reports_error():
         return status
     status = asyncio.run(scenario())
     assert status["listening"] is False and "Listen failed" in status["last_error"]
+
+
+def test_result_images_overwritten_each_run(client):
+    from src.core import config
+    code_file = config.RESULT_IMAGES_DIR / "2D-Code" / "code_result.jpg"
+    thread_file = config.RESULT_IMAGES_DIR / "Thread" / "thread_result.jpg"
+    client.post("/api/inspect/offline", files=_files(CODE, THREAD))
+    assert code_file.is_file() and thread_file.is_file()
+    first = (code_file.stat().st_mtime_ns, thread_file.read_bytes())
+    client.post("/api/inspect/offline", files=_files(CODE, NO_THREAD))
+    assert code_file.stat().st_mtime_ns >= first[0] and thread_file.read_bytes() != first[1]
+    for folder in (code_file.parent, thread_file.parent):     # exactly one file per camera, no temp leftovers
+        assert [f.name for f in folder.iterdir()] == [folder.joinpath(
+            "code_result.jpg" if folder.name == "2D-Code" else "thread_result.jpg").name]
+    image = cv2.imread(str(thread_file))
+    assert image is not None and image.shape[:2] == cv2.imread(str(NO_THREAD)).shape[:2]

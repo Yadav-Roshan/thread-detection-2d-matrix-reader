@@ -28,6 +28,11 @@ and restored at startup.
   - **Detection** gates
   - **Hercules** link
 
+## Latest result images
+
+Every run overwrites one annotated image per camera beside the app:
+`result_images\2D-Code\code_result.jpg` and `result_images\Thread\thread_result.jpg` (no history kept).
+
 ## Hercules (station = TCP server, Hercules = client)
 
 | Hercules sends | Station replies |

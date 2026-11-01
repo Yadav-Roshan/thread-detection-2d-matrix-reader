@@ -7,6 +7,7 @@ _TMP = Path(tempfile.mkdtemp(prefix="thread-inspection-tests-"))
 os.environ.setdefault("THREAD_CONFIG_DIR", str(_TMP / "config"))
 os.environ.setdefault("THREAD_PDF_DIR", str(_TMP / "pdf"))
 os.environ.setdefault("THREAD_FRAMES_DIR", str(_TMP / "frames"))
+os.environ.setdefault("THREAD_RESULT_IMAGES_DIR", str(_TMP / "result_images"))
 
 import pytest  # noqa: E402
 

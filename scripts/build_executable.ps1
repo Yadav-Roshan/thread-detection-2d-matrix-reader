@@ -5,9 +5,13 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
 $AppName = "CamShaft_Inspection_Station"
-$AppDir = Join-Path $Root "dist\$AppName"
+# Output folder (default dist). Use another if a station is running from dist:
+#   $env:BUILD_DIST = "release"; .\scripts\build_executable.ps1
+$DistName = if ($env:BUILD_DIST) { $env:BUILD_DIST } else { "dist" }
+$DistDir = Join-Path $Root $DistName
+$AppDir = Join-Path $DistDir $AppName
 $ExePath = Join-Path $AppDir "$AppName.exe"
-$ZipPath = Join-Path $Root "dist\$AppName-win64.zip"
+$ZipPath = Join-Path $DistDir "$AppName-win64.zip"
 
 Write-Host "==> Building frontend (Next.js static export)"
 Push-Location frontend
@@ -27,10 +31,11 @@ if (-not (Test-Path "$Root\models\thread_classifier.joblib")) {
 Write-Host "==> Running PyInstaller (onedir)"
 uv run pyinstaller packaging/camshaft_station.spec --noconfirm `
     --workpath "$Root\build\pyinstaller" `
-    --distpath "$Root\dist"
+    --distpath "$DistDir"
 if (-not (Test-Path $ExePath)) { throw "Missing $ExePath" }
 
-# Ship the training images so the model can be retrained on site (SETUP / API).
+# Ship the training images so the model can be retrained on site (API).
+New-Item -ItemType Directory -Force "$AppDir\data" | Out-Null
 Copy-Item -Recurse -Force "$Root\data\Thread" "$AppDir\data\Thread"
 Copy-Item -Recurse -Force "$Root\data\No-Thread" "$AppDir\data\No-Thread"
 Copy-Item -Force "$Root\packaging\OPERATOR_README.txt" "$AppDir\README.txt"

@@ -12,3 +12,5 @@ build/
 frontend/out/
 *.pyc
 .env
+release/
+result_images/

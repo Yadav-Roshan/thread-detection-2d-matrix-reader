@@ -115,9 +115,7 @@ class ReportWriter:
                   Spacer(1, 0.1 * inch)]
 
         story.append(Paragraph("CHECK RESULTS", heading))
-        ev = thread_result.get("evidence") or {}
         small = ParagraphStyle("S", parent=styles["BodyText"], fontSize=8.5, leading=10, wordWrap="CJK")
-        conf = thread_result.get("confidence")
         rows = [
             ["Check", "Result", "Status", "Detail"],
             ["2D Data Matrix", Paragraph(code_result.get("text") or "NOT READ", small),
@@ -125,9 +123,7 @@ class ReportWriter:
              Paragraph(code_result.get("message") or "", styles["BodyText"])],
             ["Thread presence", Paragraph(_STATE_TEXT.get(thread_result.get("state"), str(thread_result.get("state"))), small),
              "PASS" if thread_result.get("passed") else "FAIL",
-             Paragraph((thread_result.get("message") or "") +
-                       (f" (confidence {conf * 100:.0f}%)" if isinstance(conf, (int, float)) else ""),
-                       styles["BodyText"])],
+             Paragraph(thread_result.get("message") or "", styles["BodyText"])],
         ]
         table = Table(rows, colWidths=[1.2 * inch, 2.3 * inch, 0.6 * inch, 3.2 * inch])
         table.setStyle(TableStyle([
@@ -151,10 +147,6 @@ class ReportWriter:
                                           ("FONTSIZE", (0, 0), (-1, 0), 8), ("TEXTCOLOR", (0, 0), (-1, 0), BLUE),
                                           ("ALIGN", (0, 0), (-1, -1), "CENTER")]))
                 story += [grid, Spacer(1, 0.1 * inch)]
-            if ev:
-                story.append(Paragraph(
-                    "Thread evidence: " + ", ".join(f"{k}={v}" for k, v in ev.items() if k != "center"),
-                    ParagraphStyle("E", parent=styles["BodyText"], fontSize=7, textColor=colors.grey)))
             SimpleDocTemplate(str(path), pagesize=A4, topMargin=0.5 * inch, bottomMargin=0.5 * inch,
                               leftMargin=0.5 * inch, rightMargin=0.5 * inch,
                               title=TITLE, author="CamShaft Inspection Station").build(story)
