@@ -66,8 +66,10 @@ also type a path. The default folder is `reports\pdf`. The logo is `assets\logo.
 
 Otherwise the result is ABSENT or NOT_VISIBLE, and both are NO-GO.
 
-Cross-validated on 117 images, there were 0 false accepts out of 32 No-Thread images, and 82 of 85 Thread
-images were recognised. All hand and far-view test images were rejected.
+Cross-validated on 117 images (PRESENT = positive): accuracy 96.6%, precision 100% (0 of 32 thread-less
+bores accepted, no false GO), recall 95.3% (81 of 85 threads; the rest are safe NO-GO re-checks).
+Part faces seen from outside (the 2D-Code images, each held out in turn), hand / far / room scenes are all
+rejected. Frames that must never pass can be added to `data/Reject` and the model retrained.
 
 ## Windows executable (production)
 
@@ -84,6 +86,14 @@ To install, copy and extract the zip on the station PC and double-click the exe.
 Keep the whole folder together (`_internal\` is required). The `config\`, `reports\` and `logs\` folders are
 created beside the exe. An optional `.env` beside the exe can override `PORT`, `HOST`, `OPEN_BROWSER` and
 `CAMERA_PROBE_MAX`. Operator notes are in `packaging\OPERATOR_README.txt`, shipped as `README.txt`.
+
+## Updating a station
+
+Double-click `Update_Station.bat` in the station folder: it downloads the latest release, replaces only the
+program files and keeps `config`, `reports`, `logs`, `result_images` and retrained models (previous version in
+`_previous_version`). Saved detection settings from older versions are migrated automatically. Stations on
+v1.1.0 (no updater yet): copy `Update_Station.bat` and `Update_Station.ps1` from the release into the station
+folder first.
 
 ## Tests
 

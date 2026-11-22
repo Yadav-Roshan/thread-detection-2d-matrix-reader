@@ -26,3 +26,12 @@ FOLDERS CREATED BESIDE THE EXE
   result_images\thread_result.jpg   latest annotated thread image (overwritten every run)
 
 Optional .env beside the exe: PORT=8000, HOST=127.0.0.1, OPEN_BROWSER=1, CAMERA_PROBE_MAX=6
+
+UPDATING TO A NEW VERSION
+  Double-click Update_Station.bat in this folder. It downloads the latest release, stops the
+  station, replaces only the program files and starts it again. Settings (config), reports,
+  logs, result images and retrained models are kept; the old version is kept in
+  _previous_version. Offline: drag a downloaded release zip onto Update_Station.bat.
+
+TEACHING THE STATION A FALSE "THREAD PRESENT" SCENE
+  Save the borescope frame (save button on the feed) into data\Reject and retrain the model.

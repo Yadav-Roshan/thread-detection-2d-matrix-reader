@@ -119,3 +119,28 @@ def test_camera_endpoints_without_hardware(client):
     assert client.get("/api/camera/thread/status").json()["connected"] is False
     assert client.get("/api/camera/bogus/status").status_code == 404
     assert client.post("/api/camera/code/save-frame").status_code == 503
+
+
+def test_old_detection_settings_are_migrated(tmp_path):
+    """v1.1 stations may have saved the old defaults; they must move to the safer v1.2 defaults,
+    while a value an engineer deliberately changed is kept."""
+    import json
+    from src.inspection.thread_classifier import DetectionParams
+    from src.storage.settings_store import SettingsStore
+    (tmp_path / "detection.json").write_text(json.dumps({
+        "min_ridge_area": 75000.0, "min_ridge_band_px": 180.0, "min_purity": 0.4,
+        "min_classifier_margin": 0.25, "max_novelty": 3.0}), encoding="utf-8")
+    store = SettingsStore(tmp_path)
+    params = store.get_detection()
+    new = DetectionParams()
+    assert params.min_purity == new.min_purity and params.min_classifier_margin == new.min_classifier_margin
+    assert params.min_ridge_density == new.min_ridge_density
+    assert params.max_novelty == 3.0                     # engineer's own value kept
+    saved = json.loads((tmp_path / "detection.json").read_text(encoding="utf-8"))
+    assert saved["_schema"] == SettingsStore.DETECTION_SCHEMA
+    assert store.get_detection() == params               # stable after migration
+
+
+def test_detection_api_hides_internal_schema_field(client):
+    body = client.get("/api/config/detection").json()
+    assert "_schema" not in body and "min_ridge_density" in body

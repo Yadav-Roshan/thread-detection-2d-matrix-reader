@@ -14,6 +14,7 @@ export type DetectionParams = {
   min_ridge_area: number;
   min_ridge_band_px: number;
   min_purity: number;
+  min_ridge_density: number;
   min_classifier_margin: number;
   max_novelty: number;
 };

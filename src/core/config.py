@@ -41,6 +41,7 @@ _LOCAL_MODEL = BASE_DIR / "models" / "thread_classifier.joblib"
 # A retrained model beside the exe wins over the bundled one.
 MODEL_PATH = _path("THREAD_MODEL_PATH", _LOCAL_MODEL if (not FROZEN or _LOCAL_MODEL.exists()) else _BUNDLED_MODEL)
 MODEL_SAVE_PATH = _path("THREAD_MODEL_PATH", _LOCAL_MODEL)
+BUNDLED_MODEL_PATH = _BUNDLED_MODEL
 PDF_DIR = _path("THREAD_PDF_DIR", BASE_DIR / "reports" / "pdf")
 ASSETS_DIR = RESOURCE_DIR / "assets"
 FRAMES_DIR = _path("THREAD_FRAMES_DIR", BASE_DIR / "frames")

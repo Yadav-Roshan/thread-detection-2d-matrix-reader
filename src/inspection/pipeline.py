@@ -9,7 +9,6 @@ import numpy as np
 
 from src.inspection.matrix_reader import DecodeError, decode_array
 from src.inspection.thread_classifier import DetectionParams, ThreadClassifier, ThreadDecision, crop_roi
-from src.inspection.thread_evidence import ThreadEvidence, ridge_mask
 
 TEAL, GREEN, RED, AMBER = (136, 148, 13), (74, 163, 22), (38, 38, 220), (11, 158, 245)
 
@@ -62,23 +61,12 @@ def annotate_code(image: np.ndarray, roi, outcome: CodeOutcome) -> np.ndarray:
 
 
 def annotate_thread(image: np.ndarray, roi, decision: ThreadDecision) -> np.ndarray:
+    """Clean result image: the camera frame as captured, with only the ROI box (if one is set)
+    coloured by the verdict. No segmentation mask or markers are drawn on the operator image."""
     vis = _ensure_bgr(image).copy()
-    x, y, w, h = roi if roi else (0, 0, vis.shape[1], vis.shape[0])
-    crop = vis[y:y + h, x:x + w]
-    try:
-        cx, cy = decision.evidence.get("center", [w / 2, h / 2])
-        evidence = ThreadEvidence(0, 0, 0, 0, 0, float(cx), float(cy))
-        mask = ridge_mask(crop, evidence)
-        if decision.state != "NOT_VISIBLE":
-            overlay_colour = np.array(GREEN if decision.passed else AMBER, np.uint8)
-            crop[mask] = (0.45 * crop[mask] + 0.55 * overlay_colour).astype(np.uint8)
-        centre = (int(evidence.center_x), int(evidence.center_y))
-        if 0 <= centre[0] < w and 0 <= centre[1] < h:
-            cv2.drawMarker(crop, centre, (255, 255, 255), cv2.MARKER_CROSS, 24, 2)
-    except ValueError:
-        pass
-    colour = GREEN if decision.passed else (AMBER if decision.state == "NOT_VISIBLE" else RED)
     if roi:
+        x, y, w, h = roi
+        colour = GREEN if decision.passed else (AMBER if decision.state == "NOT_VISIBLE" else RED)
         cv2.rectangle(vis, (x, y), (x + w, y + h), colour, 3)
     return vis
 

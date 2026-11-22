@@ -34,7 +34,7 @@ const base = `http://127.0.0.1:${server.address().port}`;
 
 // ------------------------------------------------------------------ mock API
 const DECODED = '005715051079230AP666711026002315';
-const params = { min_ridge_area: 75000, min_ridge_band_px: 180, min_purity: 0.4, min_classifier_margin: 0.5, max_novelty: 2.5 };
+const params = { min_ridge_area: 75000, min_ridge_band_px: 180, min_purity: 0.45, min_ridge_density: 0.26, min_classifier_margin: 0.0, max_novelty: 2.5 };
 const reportId = (verdict, part = DECODED) => `2026/11/01/${verdict}/${part}_130405.pdf`;
 const reportUrl = (id) => `/api/reports/file/${id}`;
 
@@ -288,7 +288,7 @@ try {
   // ---- Detection
   await page.getByRole('button', { name: 'Save detection params' }).click();
   await page.getByRole('heading', { name: 'Detection parameters saved' }).waitFor();
-  check(state.posted.detection?.min_purity === 0.4, 'detection body mismatch');
+  check(state.posted.detection?.min_purity === 0.45 && state.posted.detection?.min_ridge_density === 0.26, 'detection body mismatch');
   await page.getByRole('button', { name: 'OK' }).click();
 
   // ---- Hercules settings

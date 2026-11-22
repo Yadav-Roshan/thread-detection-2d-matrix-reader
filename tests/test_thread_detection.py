@@ -118,3 +118,51 @@ def test_cv_metrics_recorded(classifier):
     metrics = classifier.metrics
     assert metrics["false_accept_rate"] == 0.0
     assert metrics["thread_recall"] >= 0.9
+
+
+# ---------------------------------------------------------------- v1.2 regression: false PRESENT
+CODE_FACES = sorted((DATA / "2D-Code").glob("*.jpg"))
+BUGS = DATA / "Bugs"
+
+
+@pytest.mark.parametrize("path", CODE_FACES, ids=lambda p: p.name)
+def test_part_face_seen_from_outside_is_never_present(classifier, path):
+    """Bug 2026-11-22: thread camera pointed at a part face (outside, not into the bore) said PRESENT."""
+    assert classifier.predict(_img(path), None, P).state != "PRESENT"
+
+
+@pytest.mark.parametrize("path", CODE_FACES, ids=lambda p: p.name)
+def test_part_face_rotated_or_zoomed_is_never_present(classifier, path):
+    img = _img(path)
+    h, w = img.shape[:2]
+    zoomed = cv2.resize(img[h // 6: h - h // 6, w // 5: w - w // 5], (w, h))
+    for view in (cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE), cv2.flip(zoomed, 0)):
+        assert classifier.predict(cv2.resize(view, (w, h)), None, P).state != "PRESENT"
+
+
+@pytest.mark.parametrize("name,box", [
+    ("False-Thread-Detection-22-11-2026_1.jpg", (288, 486, 688, 1058)),
+    ("False-Thread-Detection-22-11-2026_2.jpg", (248, 482, 767, 1125)),
+], ids=["room-scene", "part-face"])
+def test_reported_bug_scenes_are_not_present(classifier, name, box):
+    photo = cv2.imread(str(BUGS / name))
+    y0, y1, x0, x1 = box
+    scene = cv2.resize(photo[y0:y1, x0:x1], (1280, 720))
+    assert classifier.predict(scene, None, P).state != "PRESENT"
+
+
+def test_held_out_reject_scenes_metric(classifier):
+    assert classifier.metrics["reject_images"] >= 5
+    assert classifier.metrics["reject_images_accepted"] == 0
+
+
+def test_thread_result_image_has_no_mask_overlay(classifier):
+    from src.inspection.pipeline import run_thread_step
+    img = _img(THREAD[3])
+    step = run_thread_step(img, None, classifier, P)
+    assert step.result["state"] == "PRESENT"
+    assert np.array_equal(step.image, img)          # no mask, no marker: frame as captured
+    roi = (100, 50, 900, 600)
+    boxed = run_thread_step(img, roi, classifier, P).image
+    inside = (slice(60, 640), slice(110, 990))
+    assert np.array_equal(boxed[inside], img[inside])  # only the ROI outline is drawn

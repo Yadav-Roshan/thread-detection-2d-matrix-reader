@@ -93,6 +93,13 @@ const DETECTION_FIELDS: ParamField[] = [
     help: 'Share of fine texture that is thread-ordered. Plain bores, scratches and skin score low.',
   },
   {
+    key: 'min_ridge_density',
+    label: 'Min ridge density (0–1)',
+    step: 0.01,
+    integer: false,
+    help: 'How densely thread crests fill the ring zone. A part face seen from outside, fixtures or a room stay below.',
+  },
+  {
     key: 'min_classifier_margin',
     label: 'Min classifier margin',
     step: 0.05,
@@ -112,6 +119,7 @@ const EMPTY_PARAMS: DetectionParams = {
   min_ridge_area: 0,
   min_ridge_band_px: 0,
   min_purity: 0,
+  min_ridge_density: 0,
   min_classifier_margin: 0,
   max_novelty: 0,
 };

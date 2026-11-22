@@ -34,6 +34,7 @@ class State:
     hercules = HerculesServer()
     last_scan: Optional[CodeStep] = None   # Hercules: last scanjobno result, paired with next threadpresence
     classifier: Optional[ThreadClassifier] = None
+    classifier_path: Optional[str] = None
     classifier_lock = threading.Lock()
     inspect_lock = threading.Lock()
     shutting_down = False
@@ -42,11 +43,17 @@ class State:
 def get_classifier() -> ThreadClassifier:
     with State.classifier_lock:
         if State.classifier is None:
-            try:
-                State.classifier = ThreadClassifier.load(config.MODEL_PATH)
-            except (FileNotFoundError, ValueError):
+            for candidate in dict.fromkeys((config.MODEL_PATH, config.BUNDLED_MODEL_PATH)):
+                try:
+                    State.classifier = ThreadClassifier.load(candidate)
+                    State.classifier_path = str(candidate)
+                    break
+                except (FileNotFoundError, ValueError) as exc:  # missing or from an older version
+                    logging.getLogger("station.model").warning("Model %s not usable: %s", candidate, exc)
+            if State.classifier is None:
                 State.classifier = ThreadClassifier.train(config.DATA_DIR)
                 State.classifier.save(config.MODEL_SAVE_PATH)
+                State.classifier_path = str(config.MODEL_SAVE_PATH)
         return State.classifier
 
 
@@ -193,7 +200,8 @@ def change_password(body: ChangePasswordRequest) -> dict:
 
 @router.get("/api/model/status")
 def model_status() -> dict:
-    return {"model_path": str(config.MODEL_PATH), "metrics": get_classifier().metrics}
+    classifier = get_classifier()
+    return {"model_path": State.classifier_path, "metrics": classifier.metrics}
 
 
 @router.post("/api/model/train")
@@ -202,6 +210,7 @@ def model_train() -> dict:
     classifier.save(config.MODEL_SAVE_PATH)
     with State.classifier_lock:
         State.classifier = classifier
+        State.classifier_path = str(config.MODEL_SAVE_PATH)
     return {"model_path": str(config.MODEL_SAVE_PATH), "metrics": classifier.metrics}
 
 

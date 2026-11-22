@@ -34,8 +34,9 @@ ROI = `{ "x": int, "y": int, "width": int, "height": int }` in **natural image p
 {
   "min_ridge_area": 75000,      // native px² of tangential thread ridges needed for PRESENT
   "min_ridge_band_px": 180,     // radial depth of the ridge zone (far view → small)
-  "min_purity": 0.4,            // share of fine texture that is thread-ordered (0–1)
-  "min_classifier_margin": 0.25, // SVM margin needed for PRESENT
+  "min_purity": 0.45,           // share of fine texture that is thread-ordered (0–1)
+  "min_ridge_density": 0.26,    // ridge share of the ring zone (part faces / scenes stay below)
+  "min_classifier_margin": 0.0, // SVM margin needed for PRESENT
   "max_novelty": 2.0           // reject views unlike training bores (hand, wrong scene)
 }
 ```
@@ -59,7 +60,6 @@ ROI = `{ "x": int, "y": int, "width": int, "height": int }` in **natural image p
   "thread_result": {
     "passed": true,
     "state": "PRESENT" | "ABSENT" | "NOT_VISIBLE",
-    "confidence": 0.97,
     "message": "...",
     "evidence": { "ridge_area": 120000, "ridge_band_px": 300, "purity": 0.7, "symmetry": 8, "coverage": 1, "classifier_margin": 1.2, "novelty": 0.6 }
   },

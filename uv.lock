@@ -1285,7 +1285,7 @@ wheels = [
 
 [[package]]
 name = "thread-detection-2d-matrix-read"
-version = "1.0.0"
+version = "1.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },

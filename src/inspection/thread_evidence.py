@@ -15,6 +15,10 @@ GO / NO-GO gates use:
 * ``band_px``      – radial extent (native px) of the ridge zone (small when seen from far).
 * ``symmetry``     – strength of the radial-symmetry vote peak (a bore is present at all).
 * ``coverage``     – fraction of 10° sectors around the centre that contain ridges.
+* ``density``      – share of the ring zone (annulus spanned by the ridges) that is covered
+                     by ridges.  Thread crests are packed closely from rim to depth; a part face
+                     seen from outside, chamfer edges, printed text or a room scene give only a
+                     few separated rings or edges, so their density stays low.
 """
 from __future__ import annotations
 
@@ -37,6 +41,7 @@ class ThreadEvidence:
     coverage: float
     center_x: float       # in input-image pixels
     center_y: float
+    density: float = 0.0  # ridge share of the ring zone (see module docstring)
 
     def as_dict(self) -> dict:
         return {k: round(float(v), 4) for k, v in asdict(self).items()}
@@ -145,12 +150,14 @@ def measure_thread_evidence(image: np.ndarray) -> ThreadEvidence:
         coverage = len(np.unique(sectors)) / 36
         r5, r95 = np.percentile(radius[ridge], [5, 95])
         band_px = (r95 - r5) * to_native
+        annulus = (radius >= r5) & (radius <= r95)
+        density = ridge_count / max(int(annulus.sum()), 1)
     else:
-        coverage, band_px = 0.0, 0.0
+        coverage, band_px, density = 0.0, 0.0, 0.0
     return ThreadEvidence(
         ridge_area=float(ridge_area), purity=float(purity), band_px=float(band_px),
         symmetry=float(symmetry), coverage=float(coverage),
-        center_x=float(cx / scale), center_y=float(cy / scale),
+        center_x=float(cx / scale), center_y=float(cy / scale), density=float(density),
     )
 
 

@@ -30,7 +30,10 @@ from src.inspection.thread_evidence import ThreadEvidence, measure_thread_eviden
 
 LABELS = ("No-Thread", "Thread")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-MODEL_VERSION = 2
+MODEL_VERSION = 3
+# Scenes that must never be called PRESENT (part faces seen from outside, fixtures, rooms...).
+# They are trained as "No-Thread" with augmentation; drop new false-positive frames in data/Reject.
+REJECT_FOLDERS = ("2D-Code", "Reject")
 
 
 @dataclass
@@ -38,8 +41,9 @@ class DetectionParams:
     """Operator-tunable gates (SETUP → Detection). Defaults are calibrated on the dataset."""
     min_ridge_area: float = 75000.0      # native px² of tangential thread ridges
     min_ridge_band_px: float = 120.0     # radial depth of the ridge zone (far view → small); noisy, so a floor only
-    min_purity: float = 0.40             # share of fine texture that is thread-ordered
-    min_classifier_margin: float = 0.25  # SVM decision value needed for PRESENT
+    min_purity: float = 0.45             # share of fine texture that is thread-ordered
+    min_ridge_density: float = 0.26      # ridge share of the ring zone; part faces / scenes stay below
+    min_classifier_margin: float = 0.0   # SVM decision value needed for PRESENT (model also trained on reject scenes)
     max_novelty: float = 2.0             # 1.0 = p99.5 of training views; genuine new sessions reach ~1.7, hands > 4.5
 
     @classmethod
@@ -136,7 +140,8 @@ def _decide(margin: float, novelty: float, ev: ThreadEvidence, params: Detection
     resolved = ev.ridge_area >= params.min_ridge_area and ev.band_px >= params.min_ridge_band_px
     if not resolved and ev.purity >= params.min_purity:
         return "NOT_VISIBLE", "Thread rings too small to verify — move the borescope closer / into the hole"
-    if resolved and ev.purity >= params.min_purity and margin >= params.min_classifier_margin:
+    dense = ev.density >= params.min_ridge_density
+    if resolved and dense and ev.purity >= params.min_purity and margin >= params.min_classifier_margin:
         return "PRESENT", "Thread ridges detected around the bore"
     return "ABSENT", "No thread detected — if the borescope is not inserted and in focus, reposition and CHECK again"
 
@@ -173,9 +178,48 @@ class ThreadClassifier:
     def _make_svm():
         return make_pipeline(StandardScaler(), SVC(kernel="rbf", C=3.0, gamma="scale", class_weight="balanced"))
 
+    @staticmethod
+    def load_rejects(root: str | Path) -> list[tuple[str, np.ndarray]]:
+        """Images of scenes that must never pass (see REJECT_FOLDERS)."""
+        out = []
+        for folder in REJECT_FOLDERS:
+            path = Path(root) / folder
+            if not path.is_dir():
+                continue
+            for f in sorted(path.iterdir()):
+                if f.suffix.lower() in IMAGE_SUFFIXES:
+                    image = cv2.imread(str(f), cv2.IMREAD_COLOR)
+                    if image is not None:
+                        out.append((f"{folder}/{f.name}", image))
+        return out
+
+    @staticmethod
+    def augment_reject(image: np.ndarray) -> list[np.ndarray]:
+        """Rotations, mirror and zoomed crops — the borescope can see a part face at any angle and distance."""
+        h, w = image.shape[:2]
+        views = [image]
+        for zoom, (fx, fy) in ((0.7, (0.5, 0.5)), (0.6, (0.3, 0.4)), (0.6, (0.7, 0.6))):
+            cw, ch = int(w * zoom), int(h * zoom)
+            x0 = int((w - cw) * fx); y0 = int((h - ch) * fy)
+            views.append(cv2.resize(image[y0:y0 + ch, x0:x0 + cw], (w, h), interpolation=cv2.INTER_LINEAR))
+        out = []
+        for v in views:
+            out.append(v)
+            out.append(cv2.flip(v, 1))
+            out.append(cv2.resize(cv2.rotate(v, cv2.ROTATE_90_CLOCKWISE), (w, h)))
+            out.append(cv2.rotate(v, cv2.ROTATE_180))
+        return out
+
     @classmethod
-    def fit_features(cls, x: np.ndarray, y: np.ndarray, metrics: Mapping[str, Any] | None = None) -> "ThreadClassifier":
-        model = cls._make_svm().fit(x, y)
+    def fit_features(cls, x: np.ndarray, y: np.ndarray, metrics: Mapping[str, Any] | None = None,
+                     x_reject: np.ndarray | None = None) -> "ThreadClassifier":
+        """SVM learns bores + reject scenes; the novelty model describes genuine bore views only."""
+        if x_reject is not None and len(x_reject):
+            x_all = np.vstack([x, x_reject])
+            y_all = np.concatenate([y, np.full(len(x_reject), "No-Thread")])
+        else:
+            x_all, y_all = x, y
+        model = cls._make_svm().fit(x_all, y_all)
         return cls(model, _Novelty(x), metrics)
 
     @classmethod
@@ -184,19 +228,40 @@ class ThreadClassifier:
         feats = [full_features(image) for image in images]
         x = np.vstack([f for f, _ in feats])
         evidences = [e for _, e in feats]
-        metrics = cls.cross_validate(x, y, evidences)
-        return cls.fit_features(x, y, metrics)
+        rejects = cls.load_rejects(dataset_root)
+        reject_groups, reject_x, reject_orig = [], [], []
+        for gi, (_, image) in enumerate(rejects):
+            for k, view in enumerate(cls.augment_reject(image)):
+                f, e = full_features(view)
+                reject_groups.append(gi)
+                reject_x.append(f)
+                if k == 0:
+                    reject_orig.append((gi, f, e))
+        x_reject = np.vstack(reject_x) if reject_x else None
+        metrics = cls.cross_validate(x, y, evidences, x_reject=x_reject,
+                                     reject_groups=np.array(reject_groups), reject_originals=reject_orig)
+        return cls.fit_features(x, y, metrics, x_reject=x_reject)
 
     @classmethod
     def cross_validate(cls, x: np.ndarray, y: np.ndarray, evidences: list[ThreadEvidence],
-                       params: DetectionParams | None = None) -> dict:
-        """Stratified 5-fold CV of the complete gated decision (not just the SVM)."""
+                       params: DetectionParams | None = None, x_reject: np.ndarray | None = None,
+                       reject_groups: np.ndarray | None = None, reject_originals: list | None = None) -> dict:
+        """Stratified 5-fold CV of the complete gated decision (not just the SVM).
+
+        Reject scenes are always in training; each reject image is additionally tested
+        leave-one-out (the model never saw that image or any of its augmentations)."""
         params = params or DetectionParams()
         folds = min(5, int(np.unique(y, return_counts=True)[1].min()))
         splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=42)
         predicted = np.empty(len(y), dtype=object)
+        reject_accepted = 0
+        for gi, f, e in (reject_originals or []):
+            keep = reject_groups != gi
+            held = cls.fit_features(x, y, x_reject=x_reject[keep] if keep.any() else None)
+            if held._decision(f.reshape(1, -1), e, params).state == "PRESENT":
+                reject_accepted += 1
         for train_idx, test_idx in splitter.split(x, y):
-            fold = cls.fit_features(x[train_idx], y[train_idx])
+            fold = cls.fit_features(x[train_idx], y[train_idx], x_reject=x_reject)
             for i in test_idx:
                 decision = fold._decision(x[i:i + 1], evidences[i], params)
                 predicted[i] = decision.label
@@ -211,6 +276,8 @@ class ThreadClassifier:
             "accuracy": float((tp + tn) / len(y)),
             "thread_recall": float(tp / max(tp + fn, 1)),
             "false_accept_rate": float(fp / max(fp + tn, 1)),
+            "reject_images": len(reject_originals or []),
+            "reject_images_accepted": reject_accepted,
         }
 
     # ---------------------------------------------------------------- inference
@@ -231,6 +298,7 @@ class ThreadClassifier:
             "purity": round(evidence.purity, 3),
             "symmetry": round(evidence.symmetry, 2),
             "coverage": round(evidence.coverage, 2),
+            "density": round(evidence.density, 3),
             "classifier_margin": round(margin, 3),
             "novelty": round(novelty, 3),
             "center": [round(evidence.center_x, 1), round(evidence.center_y, 1)],

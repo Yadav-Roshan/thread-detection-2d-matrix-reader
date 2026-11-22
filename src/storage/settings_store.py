@@ -152,8 +152,27 @@ class SettingsStore:
         return cfg
 
     # Detection gates
+    # Values that were the factory defaults in earlier versions. A saved value equal to one of
+    # these was never chosen by an engineer, so it follows the current (safer) default instead.
+    _OLD_DETECTION_DEFAULTS = {
+        "min_ridge_area": (75000.0,),
+        "min_ridge_band_px": (120.0, 180.0),
+        "min_purity": (0.40,),
+        "min_classifier_margin": (0.25,),
+        "max_novelty": (1.0, 2.0),
+    }
+    DETECTION_SCHEMA = 2
+
     def get_detection(self) -> DetectionParams:
-        return DetectionParams.from_mapping(_read(self._detection_path, {}))
+        data = _read(self._detection_path, {})
+        if data and data.get("_schema") != self.DETECTION_SCHEMA:
+            migrated = {k: v for k, v in data.items()
+                        if not k.startswith("_") and float(v) not in self._OLD_DETECTION_DEFAULTS.get(k, ())}
+            params = DetectionParams.from_mapping(migrated)
+            with _lock:
+                _write(self._detection_path, {**params.as_dict(), "_schema": self.DETECTION_SCHEMA})
+            return params
+        return DetectionParams.from_mapping({k: v for k, v in data.items() if not k.startswith("_")})
 
     def set_detection(self, data: dict) -> DetectionParams:
         unknown = set(data) - set(DetectionParams().as_dict())
@@ -166,7 +185,7 @@ class SettingsStore:
         if values["min_purity"] > 1:
             raise ValueError("min_purity must be between 0 and 1")
         with _lock:
-            _write(self._detection_path, values)
+            _write(self._detection_path, {**values, "_schema": self.DETECTION_SCHEMA})
         return params
 
     # Auth (sha256, same scheme as cut-mark-station)
