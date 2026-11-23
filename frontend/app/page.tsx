@@ -11,6 +11,7 @@ import {
   FolderOpen,
   ImageUp,
   Loader2,
+  Keyboard,
   Lock,
   Play,
   RefreshCw,
@@ -39,6 +40,7 @@ import type {
   ROI,
   RoiConfig,
   SaveState,
+  StationMode,
   Tab,
   ThreadResult,
 } from '@/lib/types';
@@ -214,6 +216,11 @@ function noGoReason(v: ResultView): string | null {
   return parts.join(' · ') || null;
 }
 
+/** Result produced in bypass mode (job number typed by the operator, not decoded). */
+function isManualJob(v: ResultView): boolean {
+  return /job number/i.test(v.code?.format ?? '');
+}
+
 function statusFor(busy: boolean, part: { passed: boolean } | null | undefined): EndStatus {
   if (busy) return 'processing';
   if (!part) return 'idle';
@@ -244,6 +251,21 @@ export default function Home() {
   const [showLiveResult, setShowLiveResult] = useState(false);
   const [isInspecting, setIsInspecting] = useState(false);
   const [inspectError, setInspectError] = useState('');
+
+  // Bypass 2D reader (persisted server-side; job number entered by the operator)
+  const [bypass, setBypass] = useState(false);
+  const [jobNumber, setJobNumber] = useState('');
+  const [jobError, setJobError] = useState('');
+  const jobInputRef = useRef<HTMLInputElement | null>(null);
+  const jobTimerRef = useRef<number | null>(null);
+  const lastJobEditRef = useRef(0);
+  /** Last job_number seen from the server; the box re-syncs only when the server value changes. */
+  const serverJobRef = useRef<string | null>(null);
+  const [showBypassDialog, setShowBypassDialog] = useState(false);
+  const [bypassTarget, setBypassTarget] = useState(false);
+  const [bypassPassword, setBypassPassword] = useState('');
+  const [bypassError, setBypassError] = useState('');
+  const [bypassBusy, setBypassBusy] = useState(false);
 
   // SETUP → Offline test
   const [offFiles, setOffFiles] = useState<Record<CameraRole, File | null>>({ code: null, thread: null });
@@ -408,10 +430,107 @@ export default function Home() {
     };
   }, []);
 
-  // ---------------------------------------------------------------- Hercules status polling (~1 s)
+  // ---------------------------------------------------------------- bypass / job number
+  const focusJobInput = useCallback(() => {
+    window.setTimeout(() => jobInputRef.current?.focus(), 0);
+  }, []);
+
+  const cancelJobSync = useCallback(() => {
+    if (jobTimerRef.current !== null) {
+      window.clearTimeout(jobTimerRef.current);
+      jobTimerRef.current = null;
+    }
+  }, []);
+
+  /** Server state from GET /api/station/mode (page load + ~1 s poll). */
+  const applyStationMode = useCallback((mode: StationMode) => {
+    setBypass(!!mode.bypass_code_reader);
+    const serverJob = mode.job_number ?? null;
+    if (serverJob === serverJobRef.current) return;
+    serverJobRef.current = serverJob;
+    // Don't overwrite what the operator is typing right now.
+    if (jobTimerRef.current !== null || Date.now() - lastJobEditRef.current < 1500) return;
+    setJobNumber(serverJob ?? '');
+  }, []);
+
+  /** Thread result arrived (manual CHECK or Hercules): the server cleared the job number. */
+  const clearJobAfterResult = useCallback(() => {
+    cancelJobSync();
+    serverJobRef.current = null;
+    setJobNumber('');
+    setJobError('');
+    focusJobInput();
+  }, [cancelJobSync, focusJobInput]);
+
+  const handleJobChange = (value: string) => {
+    setJobNumber(value);
+    lastJobEditRef.current = Date.now();
+    cancelJobSync();
+    jobTimerRef.current = window.setTimeout(async () => {
+      jobTimerRef.current = null;
+      try {
+        const mode = await postJson<StationMode>('/api/station/job', { job_number: value.trim() });
+        serverJobRef.current = mode.job_number ?? null;
+        setJobError('');
+      } catch (e) {
+        setJobError((e as Error).message);
+      }
+    }, 300);
+  };
+
+  useEffect(() => {
+    if (bypass && activeTab === 'inspection') focusJobInput();
+  }, [bypass, activeTab, focusJobInput]);
+
+  useEffect(() => cancelJobSync, [cancelJobSync]);
+
+  const openBypassDialog = (enabled: boolean) => {
+    setBypassTarget(enabled);
+    setBypassPassword('');
+    setBypassError('');
+    setShowBypassDialog(true);
+  };
+
+  const submitBypass = async () => {
+    if (!bypassPassword || bypassBusy) return;
+    setBypassBusy(true);
+    try {
+      const mode = await postJson<StationMode>('/api/station/bypass', {
+        enabled: bypassTarget,
+        password: bypassPassword,
+      });
+      cancelJobSync();
+      setBypass(!!mode.bypass_code_reader);
+      serverJobRef.current = mode.job_number ?? null;
+      setJobNumber(mode.job_number ?? '');
+      setJobError('');
+      setInspectError('');
+      setShowBypassDialog(false);
+      setBypassPassword('');
+      setStreamEpoch((e) => ({ ...e, code: e.code + 1 }));
+    } catch (e) {
+      const msg = (e as Error).message;
+      setBypassError(/403/.test(msg) || /invalid/i.test(msg) ? 'Invalid password' : msg);
+    } finally {
+      setBypassBusy(false);
+    }
+  };
+
+  // ---------------------------------------------------------------- Hercules + station mode polling (~1 s)
   useEffect(() => {
     let cancelled = false;
+    const pollMode = async () => {
+      try {
+        const res = await fetch(apiUrl('/api/station/mode'));
+        if (!res.ok) return;
+        const mode: StationMode = await res.json();
+        if (!cancelled) applyStationMode(mode);
+      } catch {
+        /* backend unreachable; keep last state */
+      }
+    };
     const poll = async () => {
+      void pollMode();
       try {
         const res = await fetch(apiUrl('/api/hercules/status'));
         if (!res.ok) throw new Error(String(res.status));
@@ -436,6 +555,7 @@ export default function Home() {
           setLiveView(viewFromResult(ev.result));
           setShowLiveResult(true);
           setInspectError('');
+          clearJobAfterResult();
         }
       } catch {
         if (!cancelled) setHerculesStatus(null);
@@ -447,7 +567,7 @@ export default function Home() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, []);
+  }, [applyStationMode, clearJobAfterResult]);
 
   // ---------------------------------------------------------------- cameras
   const handleCameraSelect = async (role: CameraRole, value: number) => {
@@ -500,16 +620,25 @@ export default function Home() {
     }
   };
 
+  const job = jobNumber.trim();
+  const canCheck = !isInspecting && (!bypass || (!!job && activeCams.thread !== null));
+
   const runInspect = async () => {
-    if (isInspecting) return;
+    if (!canCheck) return;
     setInspectError('');
     setIsInspecting(true);
     setShowLiveResult(false);
     rememberOperator();
+    // The CHECK body carries the job number; a late debounced POST must not re-set it after the server clears it.
+    cancelJobSync();
     try {
-      const data = await postJson<InspectionResult>('/api/inspect', { operator });
+      const data = await postJson<InspectionResult>(
+        '/api/inspect',
+        bypass ? { operator, job_number: job } : { operator }
+      );
       setLiveView(viewFromResult(data));
       setShowLiveResult(true);
+      if (bypass || data.job_number_cleared) clearJobAfterResult();
     } catch (e) {
       setInspectError((e as Error).message);
       setLiveView(null);
@@ -568,6 +697,7 @@ export default function Home() {
 
   const dialogOpen =
     showAuthDialog ||
+    showBypassDialog ||
     showChangePassword ||
     showRoiSavedDialog ||
     showParamsSavedDialog ||
@@ -841,7 +971,11 @@ export default function Home() {
 
   const annotatedFor = (role: CameraRole) => (role === 'code' ? feedView?.code_image : feedView?.thread_image) ?? null;
 
+  /** INSPECTION with the 2D reader bypassed: the code feed is replaced by a placeholder (stream not requested). */
+  const isBypassedFeed = (role: CameraRole) => bypass && !inSetup && role === 'code';
+
   const feedSrc = (role: CameraRole): string | null => {
+    if (isBypassedFeed(role)) return null;
     const annotated = annotatedFor(role);
     if (annotated) return annotated;
     if (usesUpload(role)) return offUrls[role];
@@ -895,7 +1029,8 @@ export default function Home() {
     <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-black lg:flex-row lg:overflow-hidden">
       {ROLES.map((role, i) => {
         const src = feedSrc(role);
-        const resultShown = !!annotatedFor(role);
+        const bypassed = isBypassedFeed(role);
+        const resultShown = !bypassed && !!annotatedFor(role);
         const upload = usesUpload(role);
         const live = !resultShown && !upload;
         return (
@@ -910,14 +1045,28 @@ export default function Home() {
               testId={`feed-${role}`}
               src={src}
               live={live && !!src}
-              placeholder="Camera not connected"
-              roiDisplay={roiDisplayFor(role)}
+              placeholder={
+                bypassed ? (
+                  <div
+                    data-testid="bypass-placeholder"
+                    className="max-w-sm rounded-xl border-2 border-amber-400/60 bg-slate-900/90 px-6 py-5 text-center shadow-lg"
+                  >
+                    <Keyboard className="mx-auto h-10 w-10 text-amber-300" />
+                    <p className="mt-3 text-lg font-bold uppercase tracking-wide text-amber-200">2D reader bypassed</p>
+                    <p className="mt-1 text-sm text-slate-300">Job number entered manually</p>
+                    {job && <p className="mt-3 break-all font-mono text-base font-semibold text-white">{job}</p>}
+                  </div>
+                ) : (
+                  'Camera not connected'
+                )
+              }
+              roiDisplay={bypassed ? null : roiDisplayFor(role)}
               drawEnabled={inSetup && roiDrawMode === role}
               onRoiDrawn={(roi) => setRoiDraft((r) => ({ ...r, [role]: roi }))}
-              cameraControl={upload ? undefined : cameraFeedControl(role)}
+              cameraControl={upload || bypassed ? undefined : cameraFeedControl(role)}
               toolbar={
                 <FeedToolbar
-                  showSave={live && activeCams[role] !== null}
+                  showSave={!bypassed && live && activeCams[role] !== null}
                   frameSaveBusy={frameSaveBusy === role}
                   onSaveFrame={() => void saveFrame(role)}
                   backLabel={resultShown ? (inSetup ? 'Show original' : 'Back to live') : undefined}
@@ -939,12 +1088,29 @@ export default function Home() {
   );
 
   // ---------------------------------------------------------------- shared fragments
-  const resultsBlock = (view: ResultView | null, busy: boolean, error: string, testId: string, emptyText: string) => (
+  const resultsBlock = (
+    view: ResultView | null,
+    busy: boolean,
+    error: string,
+    testId: string,
+    emptyText: string,
+    jobMode = false
+  ) => (
     <div className="space-y-3" data-testid={testId}>
       <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Results</p>
       <div className="flex items-center justify-between rounded-lg border bg-slate-50 p-3">
-        <span className="font-semibold">2D Code</span>
-        <StatusIcon status={statusFor(busy, view?.code)} />
+        <span className="font-semibold">{jobMode ? 'Job number' : '2D Code'}</span>
+        <StatusIcon
+          status={
+            jobMode
+              ? busy
+                ? 'processing'
+                : job || view?.code?.passed
+                  ? 'pass'
+                  : 'idle'
+              : statusFor(busy, view?.code)
+          }
+        />
       </div>
       <div className="flex items-center justify-between rounded-lg border bg-slate-50 p-3">
         <span className="font-semibold">Thread</span>
@@ -953,7 +1119,13 @@ export default function Home() {
 
       {view && !busy ? (
         <div className="space-y-1">
-          {view.code && (
+          {view.code && isManualJob(view) && (
+            <p className="break-all text-sm text-muted-foreground">
+              <span className="font-semibold text-slate-700">Job number:</span>{' '}
+              {view.decoded_number ?? view.code.text ?? '—'} (manual)
+            </p>
+          )}
+          {view.code && !isManualJob(view) && (
             <p className="break-all text-sm text-muted-foreground">
               <span className="font-semibold text-slate-700">2D Code:</span>{' '}
               {view.code.passed
@@ -1041,6 +1213,7 @@ export default function Home() {
   const herculesLine = (() => {
     const s = herculesStatus;
     if (!s || !s.enabled) return { text: 'Hercules: off', tone: 'text-slate-500' };
+    if (bypass && !job) return { text: 'Hercules: waiting for job number', tone: 'text-amber-700' };
     if (s.client_connected)
       return { text: `Hercules: connected${s.client_addr ? ` (${s.client_addr})` : ''}`, tone: 'text-emerald-700' };
     if (s.listening) return { text: `Hercules: listening on :${s.port}`, tone: 'text-teal-700' };
@@ -1051,7 +1224,16 @@ export default function Home() {
     <div className="flex h-screen flex-col overflow-hidden bg-slate-100">
       <header className="z-40 shrink-0 border-b border-slate-200 bg-white shadow-sm">
         <div className="grid min-h-[5rem] grid-cols-[1fr_auto_1fr] items-center gap-3 px-6 py-3">
-          <div className="flex min-w-0 items-center justify-start">
+          <div className="flex min-w-0 flex-wrap items-center justify-start gap-2">
+            {bypass && (
+              <Badge
+                data-testid="bypass-badge"
+                className="shrink-0 border-transparent bg-amber-100 px-3 py-1.5 text-sm text-amber-800"
+              >
+                <Keyboard className="mr-1.5 h-4 w-4" />
+                2D READER BYPASSED
+              </Badge>
+            )}
             {liveCount === 2 ? (
               <Badge variant="destructive" data-testid="live-badge" className="shrink-0 px-3 py-1.5 text-sm">
                 <span className="mr-2 inline-block h-2 w-2 animate-ping rounded-full bg-red-600" />
@@ -1146,6 +1328,31 @@ export default function Home() {
           <>
             <SidePanel side="left" tabs={[{ id: 'station', label: 'Station' }]} active="station" onTabChange={() => {}}>
               <div className="space-y-4">
+                <div
+                  data-testid="bypass-card"
+                  className={`rounded-lg border p-3 ${
+                    bypass ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <Label className="flex items-center gap-2 normal-case text-slate-800" htmlFor="bypass-switch">
+                      <Lock className="h-4 w-4 text-slate-500" />
+                      Bypass 2D reader
+                    </Label>
+                    <Switch
+                      id="bypass-switch"
+                      aria-label="Bypass 2D reader"
+                      checked={bypass}
+                      onCheckedChange={(v) => openBypassDialog(v)}
+                    />
+                  </div>
+                  <p className={`mt-2 text-xs ${bypass ? 'text-amber-800' : 'text-muted-foreground'}`}>
+                    {bypass
+                      ? 'ON: operator enters the job number; only the thread is checked.'
+                      : 'Password required to change.'}
+                  </p>
+                </div>
+
                 <div className="rounded-lg border border-teal-200 bg-teal-50 p-4" data-testid="last-part">
                   <p className="text-xs font-bold uppercase text-teal-600">Last part</p>
                   <p className="mt-1 break-all font-mono text-xl font-bold text-teal-900">
@@ -1174,9 +1381,19 @@ export default function Home() {
                     return (
                       <div key={role} className="rounded-md border bg-slate-50 p-3" data-testid={`rule-${role}`}>
                         <p className="font-semibold text-slate-700">{ROLE_META[role].short} camera</p>
-                        <p>{role === 'code' ? '2D code must be READ' : 'Thread must be PRESENT'}</p>
+                        <p>
+                          {role === 'code'
+                            ? bypass
+                              ? 'Job number entered by operator'
+                              : '2D code must be READ'
+                            : 'Thread must be PRESENT'}
+                        </p>
                         <p className="mt-1 text-xs text-muted-foreground">
-                          {roi ? `ROI: set (${roi.width}×${roi.height} px)` : 'ROI: full frame'}
+                          {role === 'code' && bypass
+                            ? '2D reader bypassed'
+                            : roi
+                              ? `ROI: set (${roi.width}×${roi.height} px)`
+                              : 'ROI: full frame'}
                         </p>
                       </div>
                     );
@@ -1189,6 +1406,39 @@ export default function Home() {
 
             <SidePanel side="right" tabs={[{ id: 'actions', label: 'Actions' }]} active="actions" onTabChange={() => {}}>
               <div className="flex h-full flex-col gap-4">
+                {bypass && (
+                  <div className="space-y-1">
+                    <Label htmlFor="job-number">
+                      Job number <span className="text-red-600">*</span>
+                    </Label>
+                    <Input
+                      id="job-number"
+                      ref={jobInputRef}
+                      className="h-12 font-mono text-lg"
+                      placeholder="Enter job number"
+                      autoComplete="off"
+                      maxLength={64}
+                      required
+                      value={jobNumber}
+                      onChange={(e) => handleJobChange(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void runInspect();
+                        }
+                      }}
+                    />
+                    {jobError ? (
+                      <p className="text-xs font-medium text-red-600" role="alert">
+                        {jobError}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Letters, digits, - _ . / (max 64). Cleared after every thread check.
+                      </p>
+                    )}
+                  </div>
+                )}
                 <div className="space-y-1">
                   <Label htmlFor="operator">Operator</Label>
                   <Input
@@ -1201,7 +1451,7 @@ export default function Home() {
                 </div>
 
                 <div className="border-t border-slate-200 pt-4">
-                  {resultsBlock(liveView, isInspecting, inspectError, 'results', 'Run CHECK to see results.')}
+                  {resultsBlock(liveView, isInspecting, inspectError, 'results', 'Run CHECK to see results.', bypass)}
                 </div>
 
                 <p className={`text-sm ${herculesLine.tone}`} data-testid="hercules-line">
@@ -1209,11 +1459,16 @@ export default function Home() {
                 </p>
 
                 <div className="mt-auto space-y-3">
+                  {bypass && !isInspecting && !canCheck && (
+                    <p className="text-center text-xs text-amber-700" data-testid="check-hint">
+                      {!job ? 'Enter the job number to enable CHECK.' : 'Thread camera is not live.'}
+                    </p>
+                  )}
                   <Button
                     variant="success"
                     size="xl"
                     className="w-full shadow-lg"
-                    disabled={isInspecting}
+                    disabled={!canCheck}
                     onClick={() => void runInspect()}
                   >
                     {isInspecting ? (
@@ -1733,6 +1988,44 @@ export default function Home() {
           </>
         )}
       </div>
+
+      <Dialog open={showBypassDialog} onOpenChange={setShowBypassDialog}>
+        <DialogContent className="mx-4 sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{bypassTarget ? 'Turn ON 2D reader bypass' : 'Turn OFF 2D reader bypass'}</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            {bypassTarget
+              ? 'The 2D code camera will not be used. The operator enters a job number for every part; reports are filed under the job number.'
+              : 'The 2D code camera will read the Data Matrix again for every part.'}{' '}
+            Enter the SETUP password to confirm.
+          </p>
+          <div className="space-y-1">
+            <Label className="normal-case" htmlFor="bypass-password">
+              Password
+            </Label>
+            <Input
+              id="bypass-password"
+              type="password"
+              className="h-11"
+              placeholder="Enter password"
+              autoFocus
+              value={bypassPassword}
+              onChange={(e) => setBypassPassword(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void submitBypass()}
+            />
+          </div>
+          {bypassError && <p className="text-sm text-red-600">{bypassError}</p>}
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setShowBypassDialog(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => void submitBypass()} disabled={!bypassPassword || bypassBusy}>
+              {bypassTarget ? 'Turn ON' : 'Turn OFF'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showAuthDialog} onOpenChange={setShowAuthDialog}>
         <DialogContent className="mx-4 sm:max-w-md">

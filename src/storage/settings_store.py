@@ -136,6 +136,17 @@ class SettingsStore:
             _write(self.dir / "report_config.json", data)
         return path
 
+    # Station mode (persisted across restarts)
+    def get_bypass_code_reader(self) -> bool:
+        return bool(_read(self.dir / "station.json", {}).get("bypass_code_reader", False))
+
+    def set_bypass_code_reader(self, enabled: bool) -> bool:
+        with _lock:
+            data = _read(self.dir / "station.json", {})
+            data["bypass_code_reader"] = bool(enabled)
+            _write(self.dir / "station.json", data)
+        return bool(enabled)
+
     # Hercules link
     def get_hercules(self) -> dict:
         from src.outputs.hercules_server import normalize_config

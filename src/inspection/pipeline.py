@@ -75,7 +75,7 @@ def annotate_thread(image: np.ndarray, roi, decision: ThreadDecision) -> np.ndar
 class CodeStep:
     result: dict          # code_result payload
     decoded_number: str | None
-    image: np.ndarray     # annotated full frame
+    image: np.ndarray | None  # annotated full frame (None when the 2D reader is bypassed)
 
 
 @dataclass
@@ -83,6 +83,19 @@ class ThreadStep:
     result: dict          # thread_result payload
     passed: bool
     image: np.ndarray
+
+
+MANUAL_FORMAT = "Job number (manual)"
+
+
+def manual_code_step(job_number: str) -> CodeStep:
+    """2D reader bypassed: the operator-entered job number stands in for the decoded part number."""
+    return CodeStep(
+        result={"passed": True, "text": job_number, "format": MANUAL_FORMAT,
+                "message": "2D reader bypassed — job number entered by operator"},
+        decoded_number=job_number,
+        image=None,
+    )
 
 
 def run_code_step(frame: np.ndarray, roi) -> CodeStep:

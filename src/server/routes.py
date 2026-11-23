@@ -18,7 +18,9 @@ from pydantic import BaseModel
 
 from src.cameras.manager import ROLES, CameraManager, encode_jpeg
 from src.core import config
-from src.inspection.pipeline import CodeStep, overall, run_code_step, run_thread_step, to_data_url
+import re
+
+from src.inspection.pipeline import CodeStep, manual_code_step, overall, run_code_step, run_thread_step, to_data_url
 from src.inspection.thread_classifier import DetectionParams, ThreadClassifier
 from src.outputs.hercules_server import HerculesServer
 from src.outputs.pdf_report import ReportWriter
@@ -32,7 +34,8 @@ class State:
     settings = SettingsStore()
     reports = ReportWriter(lambda: State.settings.get_report_directory())
     hercules = HerculesServer()
-    last_scan: Optional[CodeStep] = None   # Hercules: last scanjobno result, paired with next threadpresence
+    last_scan: Optional[CodeStep] = None
+    job_number: Optional[str] = None       # bypass mode: operator-entered number for the next thread check   # Hercules: last scanjobno result, paired with next threadpresence
     classifier: Optional[ThreadClassifier] = None
     classifier_path: Optional[str] = None
     classifier_lock = threading.Lock()
@@ -84,6 +87,36 @@ class ChangePasswordRequest(BaseModel):
 
 class InspectRequest(BaseModel):
     operator: str = ""
+    job_number: str = ""
+
+
+class BypassRequest(BaseModel):
+    enabled: bool
+    password: str = ""
+
+
+class JobRequest(BaseModel):
+    job_number: str = ""
+
+
+_JOB_RE = re.compile(r"^[A-Za-z0-9._/\-]{1,64}$")
+
+
+def _clean_job(value: str) -> Optional[str]:
+    job = (value or "").strip()
+    if not job:
+        return None
+    if not _JOB_RE.match(job):
+        raise HTTPException(status_code=400, detail="Job number: 1-64 letters, digits, - _ . / only")
+    return job
+
+
+def _bypass() -> bool:
+    return State.settings.get_bypass_code_reader()
+
+
+def _station_mode() -> dict:
+    return {"bypass_code_reader": _bypass(), "job_number": State.job_number}
 
 
 # ------------------------------------------------------------------ health
@@ -266,7 +299,7 @@ def _payload(code: Optional[CodeStep], thread, operator: str, mode: str, timesta
         "decoded_number": code.decoded_number if code else None,
         "code_result": code.result if code else _NOT_SCANNED,
         "thread_result": thread.result,
-        "code_image": to_data_url(code.image) if code else None,
+        "code_image": to_data_url(code.image) if code is not None and code.image is not None else None,
         "thread_image": to_data_url(thread.image),
         "report_id": report_id,
         "report_url": f"/api/reports/file/{report_id}" if report_id else None,
@@ -277,18 +310,20 @@ def _elapsed_ms(start: float) -> int:
     return int(round((time.perf_counter() - start) * 1000))
 
 
-def _run_inspection(code_frame: np.ndarray, thread_frame: np.ndarray, operator: str, mode: str,
-                    started: Optional[float] = None) -> dict:
-    """``started`` = perf_counter() when the inspection began (frame capture for live checks)."""
+def _run_inspection(code_frame: Optional[np.ndarray], thread_frame: np.ndarray, operator: str, mode: str,
+                    started: Optional[float] = None, job_number: Optional[str] = None) -> dict:
+    """``started`` = perf_counter() when the inspection began (frame capture for live checks).
+    With ``job_number`` the 2D reader is bypassed and the number is used as the part identity."""
     started = started if started is not None else time.perf_counter()
     with State.inspect_lock:
         try:
-            code = run_code_step(code_frame, _rois_for(code_frame, "code"))
+            code = manual_code_step(job_number) if job_number else run_code_step(code_frame, _rois_for(code_frame, "code"))
             thread = run_thread_step(thread_frame, _rois_for(thread_frame, "thread"),
                                      get_classifier(), State.settings.get_detection())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        _save_result_image("code", code.image)
+        if code.image is not None:
+            _save_result_image("code", code.image)
         _save_result_image("thread", thread.image)
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, operator, mode, now)
@@ -302,6 +337,16 @@ def _run_inspection(code_frame: np.ndarray, thread_frame: np.ndarray, operator: 
 @router.post("/api/inspect")
 def inspect_online(body: InspectRequest) -> dict:
     started = time.perf_counter()
+    if _bypass():
+        job = _clean_job(body.job_number) or State.job_number
+        if not job:
+            raise HTTPException(status_code=400, detail="Enter the job number")
+        thread_frame = State.cameras.averaged_frame("thread")
+        if thread_frame is None:
+            raise HTTPException(status_code=503, detail="thread camera not connected — select it on the feed")
+        result = _run_inspection(None, thread_frame, body.operator, "online", started, job_number=job)
+        State.job_number = None                     # one job number per thread check
+        return {**result, "job_number_cleared": True}
     code_frame = State.cameras.frame("code")
     thread_frame = State.cameras.averaged_frame("thread")  # 3-frame mean for repeatability
     missing = [name for name, frame in (("2D code", code_frame), ("thread", thread_frame)) if frame is None]
@@ -334,12 +379,22 @@ async def inspect_offline(
 
 # ------------------------------------------------------------------ hercules handlers
 def hercules_ready() -> bool:
-    return all(State.cameras.frame(role) is not None for role in ROLES) and State.classifier is not None
+    roles = ("thread",) if _bypass() else ROLES
+    return all(State.cameras.frame(role) is not None for role in roles) and State.classifier is not None
 
 
 def hercules_scan() -> tuple[str, dict]:
     cfg = State.hercules.config
     started = time.perf_counter()
+    if _bypass():
+        job = State.job_number
+        State.last_scan = manual_code_step(job) if job else None
+        result = {"timestamp": datetime.now(timezone.utc).isoformat(), "elapsed_ms": _elapsed_ms(started),
+                  "mode": "hercules", "operator": "Hercules", "decoded_number": job,
+                  "code_result": State.last_scan.result if job else
+                  {"passed": False, "text": None, "format": None, "message": "No job number entered on the station"},
+                  "code_image": None}
+        return (job if job else cfg["scan_fail_reply"]), result
     frame = State.cameras.frame("code")
     if frame is None:
         raise RuntimeError("2D code camera not connected")
@@ -365,6 +420,10 @@ def hercules_thread() -> tuple[str, dict]:
         thread = run_thread_step(frame, _rois_for(frame, "thread"), get_classifier(), State.settings.get_detection())
         _save_result_image("thread", thread.image)
         code, State.last_scan = State.last_scan, None   # one scan pairs with one thread check
+        if _bypass():
+            if code is None and State.job_number:      # threadpresence without scanjobno: use the entered number
+                code = manual_code_step(State.job_number)
+            State.job_number = None                     # one job number per thread check
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, "Hercules", "hercules", now)
     reply = cfg["thread_ok_reply"] if thread.passed else cfg["thread_nok_reply"]
@@ -372,6 +431,30 @@ def hercules_thread() -> tuple[str, dict]:
 
 
 State.hercules.set_handlers(ready=hercules_ready, scan=hercules_scan, thread=hercules_thread)
+
+
+@router.get("/api/station/mode")
+def station_mode() -> dict:
+    return _station_mode()
+
+
+@router.post("/api/station/bypass")
+def station_bypass(body: BypassRequest) -> dict:
+    if not State.settings.check_password(body.password):
+        raise HTTPException(status_code=403, detail="Invalid password")
+    State.settings.set_bypass_code_reader(body.enabled)
+    State.job_number = None
+    State.last_scan = None
+    logging.getLogger("station").info("2D reader bypass %s", "ON" if body.enabled else "OFF")
+    return _station_mode()
+
+
+@router.post("/api/station/job")
+def station_job(body: JobRequest) -> dict:
+    if not _bypass():
+        raise HTTPException(status_code=400, detail="Job number entry is only used when the 2D reader is bypassed")
+    State.job_number = _clean_job(body.job_number)
+    return _station_mode()
 
 
 @router.get("/api/config/hercules")

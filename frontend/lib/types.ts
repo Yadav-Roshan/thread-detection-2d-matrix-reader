@@ -44,6 +44,7 @@ export type InspectionResult = {
   thread_image?: string | null;
   report_id?: string | null;
   report_url?: string | null;
+  job_number_cleared?: boolean;
   elapsed_ms?: number | null;
 };
 
@@ -92,3 +93,6 @@ export type HerculesStatus = {
     result?: HerculesEventResult | null;
   } | null;
 };
+
+/** Persisted station flag: bypass the 2D reader and use an operator-entered job number. */
+export type StationMode = { bypass_code_reader: boolean; job_number: string | null };

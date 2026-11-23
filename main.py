@@ -29,6 +29,7 @@ async def lifespan(_: FastAPI):
     log.info("startup: Hercules %s", f"listening on {hstat['bind_host']}:{hstat['port']}" if hstat["listening"]
              else ("disabled" if not hstat["enabled"] else f"error: {hstat['last_error']}"))
     log.info("startup: reports -> %s", State.settings.get_report_directory())
+    log.info("startup: 2D reader %s", "BYPASSED (job number entry)" if State.settings.get_bypass_code_reader() else "active")
     yield
     State.shutting_down = True
     await State.hercules.stop()

@@ -43,8 +43,8 @@ New-Item -ItemType Directory -Force "$AppDir\data\Reject" | Out-Null
 Copy-Item -Force "$Root\data\Reject\README.txt" "$AppDir\data\Reject\README.txt"
 Copy-Item -Force "$Root\packaging\OPERATOR_README.txt" "$AppDir\README.txt"
 # In-place updater (keeps config, reports, logs, result images, retrained models)
+uv run python scripts/make_updater.py | Out-Null   # single-file updater (launcher + embedded PowerShell)
 Copy-Item -Force "$Root\packaging\Update_Station.bat" "$AppDir\Update_Station.bat"
-Copy-Item -Force "$Root\packaging\Update_Station.ps1" "$AppDir\Update_Station.ps1"
 
 Write-Host "==> Creating release zip"
 if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }

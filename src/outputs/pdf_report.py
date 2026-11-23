@@ -103,7 +103,7 @@ class ReportWriter:
         story += [header, Spacer(1, 0.15 * inch)]
 
         info = Table([
-            ["PART NUMBER (2D):", decoded_number or UNREAD, "VERDICT:", "GO" if overall == "GO" else "NO-GO"],
+            ["JOB NUMBER:" if code_result.get("format") == "Job number (manual)" else "PART NUMBER (2D):", decoded_number or UNREAD, "VERDICT:", "GO" if overall == "GO" else "NO-GO"],
             ["OPERATOR:", operator or "-", "MODE:", mode.upper()],
             ["DATE:", timestamp.strftime("%Y-%m-%d %H:%M:%S"), "", ""],
         ], colWidths=[1.45 * inch, 2.45 * inch, 0.95 * inch, 2.45 * inch], hAlign="CENTER")
@@ -118,7 +118,8 @@ class ReportWriter:
         small = ParagraphStyle("S", parent=styles["BodyText"], fontSize=8.5, leading=10, wordWrap="CJK")
         rows = [
             ["Check", "Result", "Status", "Detail"],
-            ["2D Data Matrix", Paragraph(code_result.get("text") or "NOT READ", small),
+            ["Job number" if code_result.get("format") == "Job number (manual)" else "2D Data Matrix",
+             Paragraph(code_result.get("text") or "NOT READ", small),
              "PASS" if code_result.get("passed") else "FAIL",
              Paragraph(code_result.get("message") or "", styles["BodyText"])],
             ["Thread presence", Paragraph(_STATE_TEXT.get(thread_result.get("state"), str(thread_result.get("state"))), small),

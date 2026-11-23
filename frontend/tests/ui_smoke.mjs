@@ -74,12 +74,21 @@ const herculesConfig = {
   error_reply: 'error',
 };
 
+/** Bypass-mode result: job number instead of a decoded 2D code, no code image. */
+const manualResult = (mode, job) => result(mode, {
+  decoded_number: job,
+  code_result: { passed: true, text: job, format: 'Job number (manual)', message: '2D reader bypassed — job number entered by operator' },
+  code_image: null,
+  job_number_cleared: true,
+});
+
 const state = {
   active: { code: 0, thread: null },
   rois: { code: { x: 100, y: 80, width: 400, height: 300 }, thread: null },
   onlineCalls: 0,
   offlineCalls: 0,
-  posted: {},
+  posted: { jobs: [], inspect: [] },
+  station: { bypass_code_reader: false, job_number: null },
   reportDir: 'D:\\Reports\\CamShaft',
   resultDir: 'C:\\CamShaft\\result_images',
   hercules: {
@@ -109,7 +118,29 @@ async function handleApi(route) {
   if (path === '/api/hercules/status') return json(state.hercules);
   if (path === '/api/auth/login') return json(body().password === 'admin123' ? { success: true, message: 'ok' } : { success: false, message: 'Invalid password' });
   if (path === '/api/auth/change-password') return json({ success: true, message: 'ok' });
+  if (path === '/api/station/mode') return json(state.station);
+  if (path === '/api/station/bypass') {
+    const b = body();
+    if (b.password !== 'admin123') return json({ detail: 'Invalid password' }, 403);
+    state.station = { bypass_code_reader: !!b.enabled, job_number: null };
+    return json(state.station);
+  }
+  if (path === '/api/station/job') {
+    const b = body();
+    state.posted.jobs.push(b.job_number);
+    if (!state.station.bypass_code_reader) return json({ detail: 'Bypass is OFF' }, 400);
+    if (!/^[A-Za-z0-9\-_./]{0,64}$/.test(b.job_number)) return json({ detail: 'Job number may only contain letters, digits, - _ . /' }, 400);
+    state.station = { ...state.station, job_number: b.job_number || null };
+    return json(state.station);
+  }
   if (path === '/api/inspect') {
+    const b = body();
+    state.posted.inspect.push(b);
+    if (state.station.bypass_code_reader) {
+      if (!b.job_number) return json({ detail: 'Enter the job number' }, 400);
+      state.station = { ...state.station, job_number: null };
+      return json(manualResult('online', b.job_number));
+    }
     state.onlineCalls += 1;
     if (state.onlineCalls === 1) return json({ detail: 'Thread camera is not connected' }, 503);
     return json(result('online'));
@@ -144,6 +175,11 @@ async function handleApi(route) {
 
 // ------------------------------------------------------------------ test
 const check = (cond, msg) => { if (!cond) throw new Error(msg); };
+const until = async (fn, msg, timeout = 5000) => {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (fn()) return; await new Promise((r) => setTimeout(r, 50)); }
+  throw new Error(`timed out: ${msg}`);
+};
 const shot = async (page, name) => { if (process.env.SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.SCREENSHOT_DIR, `${name}.png`) }); };
 let browser;
 try {
@@ -227,6 +263,81 @@ try {
   await page.getByTestId('results').getByText(/Thread:\s*NOT VISIBLE/).waitFor();
   await page.getByText('Thread not visible — move the camera closer / remove obstruction').waitFor();
   await shot(page, '2-hercules-nogo');
+
+  // ---- Bypass 2D reader (job number entered by the operator)
+  const bypassSwitch = page.getByRole('switch', { name: 'Bypass 2D reader' });
+  check((await bypassSwitch.getAttribute('aria-checked')) === 'false', 'bypass should load OFF from /api/station/mode');
+  check((await page.locator('#job-number').count()) === 0, 'no job number box while bypass is OFF');
+  await bypassSwitch.click();
+  await page.getByRole('heading', { name: 'Turn ON 2D reader bypass' }).waitFor();
+  await page.locator('#bypass-password').fill('wrong');
+  await page.getByRole('button', { name: 'Turn ON', exact: true }).click();
+  await page.getByText('Invalid password', { exact: true }).waitFor();
+  check((await bypassSwitch.getAttribute('aria-checked')) === 'false', 'switch must not change on a wrong password');
+  check(state.station.bypass_code_reader === false, 'wrong password must not enable bypass');
+  await page.locator('#bypass-password').fill('admin123');
+  await page.getByRole('button', { name: 'Turn ON', exact: true }).click();
+  await page.getByTestId('bypass-badge').getByText('2D READER BYPASSED').waitFor();
+  check((await bypassSwitch.getAttribute('aria-checked')) === 'true', 'switch should be ON');
+
+  const codeFeed = page.getByTestId('feed-code');
+  await codeFeed.getByTestId('bypass-placeholder').getByText('2D reader bypassed').waitFor();
+  check((await codeFeed.locator('img').count()) === 0, 'code stream must not be requested while bypassed');
+  check((await codeFeed.getByLabel('2D Code cam').count()) === 0, 'code camera select hidden while bypassed');
+  await page.getByTestId('rule-code').getByText('Job number entered by operator').waitFor();
+  await page.getByTestId('hercules-line').getByText('Hercules: waiting for job number').waitFor();
+  await page.getByTestId('results').getByText('Job number', { exact: true }).waitFor();
+  await page.waitForFunction(() => document.activeElement?.id === 'job-number');
+  check(await checkBtn.isDisabled(), 'CHECK must be disabled until a job number is entered');
+  await page.getByTestId('check-hint').getByText('Enter the job number to enable CHECK.').waitFor();
+
+  const jobBox = page.locator('#job-number');
+  const jobsBefore = state.posted.jobs.length;
+  await jobBox.fill('AB#1');
+  await page.getByText('Job number may only contain letters, digits, - _ . /').waitFor();
+  await jobBox.fill('JOB-42/A');
+  await until(() => state.posted.jobs.at(-1) === 'JOB-42/A', 'debounced POST /api/station/job');
+  await page.waitForTimeout(500);
+  check(state.posted.jobs.length - jobsBefore === 2, `expected 2 debounced job POSTs, got ${state.posted.jobs.length - jobsBefore}`);
+  check((await page.getByText('Job number may only contain').count()) === 0, 'job error should clear after a valid number');
+  await codeFeed.getByText('JOB-42/A').waitFor();
+  await page.getByTestId('hercules-line').getByText('Hercules: connected (192.168.1.5:50122)').waitFor();
+  check(await checkBtn.isEnabled(), 'CHECK should be enabled once a job number is entered');
+  await shot(page, '2b-bypass-job');
+
+  await checkBtn.click();
+  await page.getByTestId('results').getByText('Job number: JOB-42/A (manual)').waitFor();
+  await overlay.getByText('GO', { exact: true }).waitFor();
+  const inspectBody = state.posted.inspect.at(-1);
+  check(inspectBody.job_number === 'JOB-42/A' && 'operator' in inspectBody, `bad CHECK body ${JSON.stringify(inspectBody)}`);
+  await page.waitForFunction(() => document.querySelector('#job-number')?.value === '');
+  await page.waitForFunction(() => document.activeElement?.id === 'job-number');
+  check(await checkBtn.isDisabled(), 'CHECK disabled again after the job number is cleared');
+  check((await codeFeed.locator('img').count()) === 0, 'code feed keeps the placeholder after a bypass result');
+
+  // Hercules thread cycle clears the box too.
+  await jobBox.fill('JOB-43');
+  await until(() => state.station.job_number === 'JOB-43', 'job JOB-43 synced to server');
+  state.station = { ...state.station, job_number: null };
+  state.hercules = {
+    ...state.hercules,
+    last_event: { seq: 6, kind: 'thread', message: 'threadpresence', reply: 'threadok', timestamp: '2026-11-01T13:30:00Z', result: manualResult('hercules', 'JOB-43') },
+  };
+  await page.getByTestId('results').getByText('Job number: JOB-43 (manual)').waitFor();
+  await page.waitForFunction(() => document.querySelector('#job-number')?.value === '');
+
+  // Toggle OFF restores the 2D code feed.
+  await bypassSwitch.click();
+  await page.getByRole('heading', { name: 'Turn OFF 2D reader bypass' }).waitFor();
+  await page.locator('#bypass-password').fill('admin123');
+  await page.getByRole('button', { name: 'Turn OFF', exact: true }).click();
+  await until(() => state.station.bypass_code_reader === false, 'bypass OFF on server');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="bypass-badge"]'));
+  await codeFeed.locator('img[src*="/api/camera/code/stream"]').waitFor();
+  check((await codeFeed.getByLabel('2D Code cam').count()) === 1, 'code camera select back when bypass is OFF');
+  check((await page.locator('#job-number').count()) === 0, 'job number box hidden when bypass is OFF');
+  await page.getByTestId('rule-code').getByText('2D code must be READ').waitFor();
+  await page.getByTestId('results').getByText('2D Code', { exact: true }).waitFor();
 
   // ---- SETUP password gate
   await page.getByRole('button', { name: 'SETUP' }).click();
@@ -359,7 +470,7 @@ try {
   const dialogs = await page.evaluate(() => window.__dialogs);
   check(dialogs.length === 0, `alert/confirm used: ${dialogs.join(', ')}`);
   // The deliberate 503 / 400 responses log "Failed to load resource" console errors; ignore only those.
-  const unexpected = consoleErrors.filter((t) => !/status of (503|400)/.test(t));
+  const unexpected = consoleErrors.filter((t) => !/status of (503|400|403)/.test(t));
   check(unexpected.length === 0, `console errors: ${unexpected.join(' | ')}`);
   check(pageErrors.length === 0, `page errors: ${pageErrors.join(' | ')}`);
   console.log('UI smoke test passed');

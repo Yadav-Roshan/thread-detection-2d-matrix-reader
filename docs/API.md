@@ -101,6 +101,39 @@ The latest annotated images are overwritten on every run as `<folder>/code_resul
 | POST | `/api/result-images/set-directory` | `{ directory: str \| null }` (null = default) | `{ success, directory }` · 400 with `detail` |
 | POST | `/api/result-images/browse-directory` | – | `{ directory: str \| null }` (native picker on the station PC; does not save) |
 
+## Bypass 2D matrix reader (job number entered by the operator)
+
+A persisted station flag. When ON, the 2D code camera/reader is not used: the operator types a **job number**
+on the INSPECTION screen for each part, CHECK runs the thread check only, and the report is filed under the
+job number. The job number is **cleared after every thread check** (manual CHECK or Hercules `threadpresence`).
+Turning the flag ON/OFF requires the SETUP password; the state survives restarts.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/station/mode` | – | `StationMode` |
+| POST | `/api/station/bypass` | `{ enabled: bool, password: str }` | `StationMode` · **403** `detail` "Invalid password" |
+| POST | `/api/station/job` | `{ job_number: str }` ("" clears) | `StationMode` · 400 if bypass is OFF or the number has invalid characters |
+
+`StationMode`: `{ "bypass_code_reader": bool, "job_number": str | null }` (job_number = the number waiting for
+the next thread check; poll it together with `/api/hercules/status` so the box clears after a Hercules cycle).
+
+Job number rules: 1–64 characters, letters, digits, `-`, `_`, `.`, `/` (trimmed).
+
+**Manual CHECK in bypass mode:** `POST /api/inspect` body `{ operator, job_number }` — `job_number` required
+(400 "Enter the job number" if empty). Only the thread camera must be connected. Response is the normal
+`InspectionResult` with:
+- `decoded_number` = job number, `code_image` = `null`
+- `code_result` = `{ "passed": true, "text": "<job>", "format": "Job number (manual)", "message": "2D reader bypassed — job number entered by operator" }`
+- `job_number_cleared: true`
+- GO / NO-GO depends on the thread result only.
+
+**Hercules in bypass mode:** `isready` → ready when the thread camera is live; `scanjobno` → replies with the
+entered job number (or `scan_fail_reply`, default `noread`, if none is entered); `threadpresence` → thread check,
+PDF filed under the job number, job number cleared. Hercules `scan` events carry the same manual `code_result`
+and `code_image: null`.
+
+Offline test (SETUP) is unchanged — it always reads the 2D code from the uploaded image.
+
 ## Hercules (TCP server; Hercules connects as client)
 
 | Method | Path | Body | Response |

@@ -33,6 +33,14 @@ and restored at startup.
 Every run overwrites one annotated image per camera beside the app:
 `result_images\code_result.jpg` and `result_images\thread_result.jpg` (no history kept). The folder can be changed in SETUP → Reports.
 
+## Bypass 2D reader (job number)
+
+A switch on the INSPECTION screen (SETUP password needed to turn it on or off; remembered across restarts).
+When on, the 2D code camera is not used: the operator types a job number for each part, CHECK verifies the
+thread only, the report is filed under the job number, and the number is cleared after every thread check.
+Hercules: `isready` needs only the thread camera, `scanjobno` replies with the typed job number (`noread` if
+none), `threadpresence` checks the thread and clears the job number.
+
 ## Hercules (station = TCP server, Hercules = client)
 
 | Hercules sends | Station replies |
@@ -89,11 +97,13 @@ created beside the exe. An optional `.env` beside the exe can override `PORT`, `
 
 ## Updating a station
 
-Double-click `Update_Station.bat` in the station folder: it downloads the latest release, replaces only the
-program files and keeps `config`, `reports`, `logs`, `result_images` and retrained models (previous version in
-`_previous_version`). Saved detection settings from older versions are migrated automatically. Stations on
-v1.1.0 (no updater yet): copy `Update_Station.bat` and `Update_Station.ps1` from the release into the station
-folder first.
+Put the single file `Update_Station.bat` in the station folder (next to the exe) and double-click it. It downloads
+the latest release from GitHub (offline PC: copy the release zip into the folder first), stops the station,
+replaces only the program files and restarts it. `config`, `reports`, `logs`, `result_images`, retrained models
+and data are kept; the previous version is kept in `_previous_version` and is restored automatically if the
+install fails. The window stays open with the result; details are in `Update_Station.log`. It is not blocked by
+PC script-execution policies (the PowerShell part is embedded and loaded as text) and uses the system proxy.
+Source: `packaging/Update_Station.ps1`, packed into the .bat by `scripts/make_updater.py`.
 
 ## Tests
 

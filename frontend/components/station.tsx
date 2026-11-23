@@ -329,7 +329,7 @@ export function FeedStage({
   src: string | null;
   /** MJPEG stream: poll for layout because onLoad is unreliable for multipart images. */
   live: boolean;
-  placeholder: string;
+  placeholder: React.ReactNode;
   roiDisplay: RoiDisplay | null;
   drawEnabled?: boolean;
   onRoiDrawn?: (roi: ROI) => void;
