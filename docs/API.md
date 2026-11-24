@@ -134,6 +134,36 @@ and `code_image: null`.
 
 Offline test (SETUP) is unchanged — it always reads the 2D code from the uploaded image.
 
+## Thread re-check (keep the part number, check the thread again)
+
+When a thread check is **NOK** (thread ABSENT / NOT_VISIBLE, or the thread camera failed) for a part whose
+identity is known (2D code read, or job number in bypass mode), the station keeps that part as a
+**pending re-check**. The next thread check then reuses the stored part number — the 2D code is **not** read again.
+
+- Hercules: just send `threadpresence` again (no `scanjobno`, no new command needed).
+- Operator: **Re-check thread** button (`POST /api/inspect/recheck`).
+- Every attempt writes its own PDF; the PDF and the result carry the attempt number.
+
+The pending re-check is **cleared** when: the thread check passes (GO); a new part starts — Hercules
+`scanjobno`, a normal CHECK (`POST /api/inspect`), a new job number typed in bypass mode; the operator presses
+**New part** (`POST /api/station/recheck/clear`); or bypass is toggled.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/api/inspect/recheck` | `{ operator: str }` | `InspectionResult` (thread only, stored part) · 400 "No part waiting for a thread re-check" · 503 thread camera missing |
+| POST | `/api/station/recheck/clear` | – | `StationMode` |
+
+`StationMode` gains `recheck`:
+```json
+{ "bypass_code_reader": false, "job_number": null,
+  "recheck": { "part": "005715051079230AP666711026002315", "source": "2d" | "job",
+               "attempts": 1, "last_state": "ABSENT" | "NOT_VISIBLE" | "ERROR", "since": "ISO-8601" } | null }
+```
+`InspectionResult` (and Hercules `thread` event results) gain:
+`"attempt": 1` (1 = first check, 2+ = re-check), `"recheck": true|false`, `"recheck_pending": true|false`
+(true when this result left the part waiting for a re-check). For a re-check, `code_image` is `null` and
+`code_result.message` says the number is from the earlier read.
+
 ## Hercules (TCP server; Hercules connects as client)
 
 | Method | Path | Body | Response |

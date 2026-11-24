@@ -41,6 +41,14 @@ thread only, the report is filed under the job number, and the number is cleared
 Hercules: `isready` needs only the thread camera, `scanjobno` replies with the typed job number (`noread` if
 none), `threadpresence` checks the thread and clears the job number.
 
+## Thread re-check (keep the part number)
+
+If the 2D code was read (or a job number entered) but the thread check is NOK, the station keeps the part
+number. Checking the thread again does **not** read the 2D code again: Hercules simply sends `threadpresence`
+again, or the operator presses **Re-check thread** (shortcut `R`). Each attempt gets its own PDF with the attempt
+number. The kept part is dropped on GO, when a new part starts (`scanjobno`, CHECK, a new job number) or with
+**New part**. Enter/Space always run a normal CHECK, never a re-check.
+
 ## Hercules (station = TCP server, Hercules = client)
 
 | Hercules sends | Station replies |

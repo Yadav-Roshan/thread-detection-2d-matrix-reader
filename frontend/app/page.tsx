@@ -40,6 +40,7 @@ import type {
   ROI,
   RoiConfig,
   SaveState,
+  RecheckInfo,
   StationMode,
   Tab,
   ThreadResult,
@@ -175,6 +176,9 @@ type ResultView = {
   code_image: string | null;
   thread_image: string | null;
   elapsed_ms: number | null;
+  attempt: number;
+  recheck: boolean;
+  recheck_pending: boolean;
 };
 
 function viewFromResult(r: InspectionResult | HerculesEventResult, partialScan = false): ResultView {
@@ -189,7 +193,54 @@ function viewFromResult(r: InspectionResult | HerculesEventResult, partialScan =
     code_image: r.code_image ?? null,
     thread_image: partialScan ? null : r.thread_image ?? null,
     elapsed_ms: r.elapsed_ms ?? null,
+    attempt: partialScan ? 1 : r.attempt ?? 1,
+    recheck: partialScan ? false : !!r.recheck,
+    recheck_pending: partialScan ? false : !!r.recheck_pending,
   };
+}
+
+/** A re-check has no code image: keep the previous one when it belongs to the same part. */
+function mergeRecheckView(prev: ResultView | null, next: ResultView): ResultView {
+  if (next.recheck && !next.code_image && prev?.code_image && prev.decoded_number === next.decoded_number) {
+    return { ...next, code_image: prev.code_image };
+  }
+  return next;
+}
+
+/** Pending re-check derived from a result, until the next /api/station/mode poll confirms it. */
+function recheckFromResult(r: InspectionResult | HerculesEventResult): RecheckInfo | null {
+  if (!r.recheck_pending || !r.decoded_number) return null;
+  return {
+    part: r.decoded_number,
+    source: /job number/i.test(r.code_result?.format ?? '') ? 'job' : '2d',
+    attempts: r.attempt ?? 1,
+    last_state: r.thread_result?.state ?? 'ERROR',
+    since: r.timestamp ?? null,
+  };
+}
+
+function recheckStateLabel(state: string | null | undefined): string {
+  if (state === 'ABSENT') return 'Thread ABSENT';
+  if (state === 'NOT_VISIBLE') return 'Thread NOT VISIBLE';
+  if (state === 'ERROR') return 'Thread camera error';
+  return state ? `Thread ${state}` : 'Thread NOK';
+}
+
+/** Short state for the re-check chip. */
+function recheckStateShort(state: string | null | undefined): string {
+  if (state === 'NOT_VISIBLE') return 'NOT VISIBLE';
+  if (state === 'ERROR') return 'CAMERA ERROR';
+  return state || 'NOK';
+}
+
+/** Overlay subline: NO-GO reason, attempt number, re-check hint. */
+function overlayDetail(v: ResultView): string | null {
+  const parts: string[] = [];
+  const reason = noGoReason(v);
+  if (reason) parts.push(reason);
+  if (v.overall && v.attempt > 1) parts.push(`Attempt ${v.attempt}`);
+  if (v.recheck_pending) parts.push('Re-check available');
+  return parts.join(' · ') || null;
 }
 
 function formatElapsed(ms: number): string {
@@ -266,6 +317,11 @@ export default function Home() {
   const [bypassPassword, setBypassPassword] = useState('');
   const [bypassError, setBypassError] = useState('');
   const [bypassBusy, setBypassBusy] = useState(false);
+
+  // Thread re-check (same part, thread only)
+  const [recheck, setRecheck] = useState<RecheckInfo | null>(null);
+  const [recheckBusy, setRecheckBusy] = useState(false);
+  const [recheckClearBusy, setRecheckClearBusy] = useState(false);
 
   // SETUP → Offline test
   const [offFiles, setOffFiles] = useState<Record<CameraRole, File | null>>({ code: null, thread: null });
@@ -435,6 +491,7 @@ export default function Home() {
     window.setTimeout(() => jobInputRef.current?.focus(), 0);
   }, []);
 
+
   const cancelJobSync = useCallback(() => {
     if (jobTimerRef.current !== null) {
       window.clearTimeout(jobTimerRef.current);
@@ -445,6 +502,7 @@ export default function Home() {
   /** Server state from GET /api/station/mode (page load + ~1 s poll). */
   const applyStationMode = useCallback((mode: StationMode) => {
     setBypass(!!mode.bypass_code_reader);
+    setRecheck(mode.recheck ?? null);
     const serverJob = mode.job_number ?? null;
     if (serverJob === serverJobRef.current) return;
     serverJobRef.current = serverJob;
@@ -552,9 +610,11 @@ export default function Home() {
           setShowLiveResult(true);
           setInspectError('');
         } else if (ev.kind === 'thread') {
-          setLiveView(viewFromResult(ev.result));
+          const result = ev.result;
+          setLiveView((prev) => mergeRecheckView(prev, viewFromResult(result)));
           setShowLiveResult(true);
           setInspectError('');
+          setRecheck(recheckFromResult(result));
           clearJobAfterResult();
         }
       } catch {
@@ -621,7 +681,7 @@ export default function Home() {
   };
 
   const job = jobNumber.trim();
-  const canCheck = !isInspecting && (!bypass || (!!job && activeCams.thread !== null));
+  const canCheck = !isInspecting && !recheckBusy && (!bypass || (!!job && activeCams.thread !== null));
 
   const runInspect = async () => {
     if (!canCheck) return;
@@ -638,12 +698,50 @@ export default function Home() {
       );
       setLiveView(viewFromResult(data));
       setShowLiveResult(true);
+      setRecheck(recheckFromResult(data));
       if (bypass || data.job_number_cleared) clearJobAfterResult();
     } catch (e) {
       setInspectError((e as Error).message);
       setLiveView(null);
     } finally {
       setIsInspecting(false);
+    }
+  };
+
+  /** Re-check the thread only, keeping the stored part number (POST /api/inspect/recheck). */
+  const runRecheck = async () => {
+    if (!recheck || recheckBusy || isInspecting) return;
+    setInspectError('');
+    setRecheckBusy(true);
+    setShowLiveResult(false);
+    rememberOperator();
+    try {
+      const data = await postJson<InspectionResult>('/api/inspect/recheck', { operator });
+      setLiveView((prev) => mergeRecheckView(prev, viewFromResult(data)));
+      setShowLiveResult(true);
+      setRecheck(recheckFromResult(data));
+      if (bypass) focusJobInput();
+    } catch (e) {
+      setInspectError((e as Error).message);
+      setShowLiveResult(true);
+    } finally {
+      setRecheckBusy(false);
+    }
+  };
+
+  /** Abandon the pending re-check and start a new part (POST /api/station/recheck/clear). */
+  const clearRecheck = async () => {
+    if (recheckClearBusy) return;
+    setRecheckClearBusy(true);
+    try {
+      const mode = await apiJson<StationMode>('/api/station/recheck/clear', { method: 'POST' });
+      setRecheck(mode.recheck ?? null);
+      setInspectError('');
+      if (bypass) focusJobInput();
+    } catch (e) {
+      setInspectError((e as Error).message);
+    } finally {
+      setRecheckClearBusy(false);
     }
   };
 
@@ -708,11 +806,32 @@ export default function Home() {
 
   const runInspectRef = useRef(runInspect);
   runInspectRef.current = runInspect;
+  /** Enter/Space on the re-check card buttons still mean CHECK (new part), never a re-check. */
+  const keysMeanCheck = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) void runInspectRef.current();
+    }
+  };
+  const runRecheckRef = useRef(runRecheck);
+  runRecheckRef.current = runRecheck;
 
   // Enter / Space triggers CHECK when focus is not in a form control.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (activeTab !== 'inspection' || dialogOpen) return;
+      // R = Re-check thread (only when a re-check is pending and focus is not in a text field).
+      if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const el = e.target;
+        const typing =
+          el instanceof HTMLElement &&
+          (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+        if (typing || e.repeat) return;
+        e.preventDefault();
+        void runRecheckRef.current();
+        return;
+      }
       if (e.key !== 'Enter' && e.key !== ' ') return;
       if (isTypingTarget(e.target) || e.repeat) return;
       e.preventDefault();
@@ -1077,7 +1196,7 @@ export default function Home() {
               }
               overlay={
                 role === 'thread' && feedView ? (
-                  <FeedOverlay mode={overlayMode} detail={noGoReason(feedView)} reportUrl={feedView.report_url} />
+                  <FeedOverlay mode={overlayMode} detail={overlayDetail(feedView)} reportUrl={feedView.report_url} />
                 ) : undefined
               }
             />
@@ -1094,7 +1213,9 @@ export default function Home() {
     error: string,
     testId: string,
     emptyText: string,
-    jobMode = false
+    jobMode = false,
+    /** Busy state for the 2D Code / Job number row (a thread re-check keeps it as is). */
+    codeBusy: boolean = busy
   ) => (
     <div className="space-y-3" data-testid={testId}>
       <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Results</p>
@@ -1103,12 +1224,12 @@ export default function Home() {
         <StatusIcon
           status={
             jobMode
-              ? busy
+              ? codeBusy
                 ? 'processing'
                 : job || view?.code?.passed
                   ? 'pass'
                   : 'idle'
-              : statusFor(busy, view?.code)
+              : statusFor(codeBusy, view?.code)
           }
         />
       </div>
@@ -1117,18 +1238,27 @@ export default function Home() {
         <StatusIcon status={statusFor(busy, view?.thread)} />
       </div>
 
+      {view && !busy && view.overall && (view.recheck || view.attempt > 1) && (
+        <div className="flex items-center gap-2" data-testid={`${testId}-attempt`}>
+          <Badge className="border-transparent bg-amber-100 text-amber-800">Re-check #{Math.max(1, view.attempt - 1)}</Badge>
+          <span className="text-sm font-semibold text-slate-700">Attempt {view.attempt}</span>
+        </div>
+      )}
+
       {view && !busy ? (
         <div className="space-y-1">
           {view.code && isManualJob(view) && (
             <p className="break-all text-sm text-muted-foreground">
               <span className="font-semibold text-slate-700">Job number:</span>{' '}
-              {view.decoded_number ?? view.code.text ?? '—'} (manual)
+              {view.decoded_number ?? view.code.text ?? '—'} {view.recheck ? '(kept)' : '(manual)'}
             </p>
           )}
           {view.code && !isManualJob(view) && (
             <p className="break-all text-sm text-muted-foreground">
               <span className="font-semibold text-slate-700">2D Code:</span>{' '}
-              {view.code.passed
+              {view.code.passed && view.recheck
+                ? `${view.decoded_number ?? view.code.text ?? ''} (kept from earlier read)`
+                : view.code.passed
                 ? `${view.code.text ?? view.decoded_number ?? ''}${view.code.format ? ` (${view.code.format})` : ''}`
                 : `NOT READ${view.code.message ? ` — ${view.code.message}` : ''}`}
             </p>
@@ -1368,6 +1498,7 @@ export default function Home() {
                         {liveView.overall
                           ? `${liveView.overall === 'GO' ? 'GO' : 'NO-GO'} · Thread ${threadStateLabel(liveView.thread?.state)}`
                           : 'Scanned · waiting for thread check'}
+                        {liveView.overall && liveView.attempt > 1 ? ` · Attempt ${liveView.attempt}` : ''}
                       </p>
                     </>
                   ) : (
@@ -1405,7 +1536,72 @@ export default function Home() {
             {renderFeeds()}
 
             <SidePanel side="right" tabs={[{ id: 'actions', label: 'Actions' }]} active="actions" onTabChange={() => {}}>
-              <div className="flex h-full flex-col gap-4">
+              <div className="flex min-h-full flex-col gap-4">
+                {recheck && (
+                  <div
+                    data-testid="recheck-card"
+                    className="space-y-2 rounded-lg border-2 border-amber-300 bg-amber-50 px-3 py-2.5 shadow-sm"
+                  >
+                    <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-amber-800">
+                      <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+                      Thread re-check pending
+                    </p>
+                    <div className="flex min-w-0 items-center gap-2">
+                      <p
+                        className="min-w-0 flex-1 truncate font-mono text-base font-bold text-slate-900"
+                        title={recheck.part}
+                      >
+                        {recheck.part}
+                      </p>
+                      <span
+                        data-testid="recheck-chip"
+                        className="shrink-0 whitespace-nowrap rounded-full bg-amber-200 px-2 py-0.5 text-[11px] font-bold uppercase text-amber-900"
+                        title={`Attempt ${recheck.attempts} · ${recheckStateLabel(recheck.last_state)}`}
+                      >
+                        Attempt {recheck.attempts} · {recheckStateShort(recheck.last_state)}
+                      </span>
+                    </div>
+                    <p
+                      className="truncate text-xs text-amber-900/80"
+                      title="Re-check the thread only, keeping the part number. Hercules: send threadpresence again, or use Re-check thread (R)."
+                    >
+                      {recheck.source === 'job' ? 'Job number' : '2D code'} kept — Hercules: send threadpresence again,
+                      or:
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        className="h-10 flex-1 bg-amber-500 px-2 font-bold text-white shadow hover:bg-amber-600"
+                        disabled={recheckBusy || isInspecting}
+                        onClick={(e) => {
+                          e.currentTarget.blur();
+                          void runRecheck();
+                        }}
+                        onKeyDown={keysMeanCheck}
+                        title="Re-check thread (shortcut R)"
+                      >
+                        {recheckBusy ? (
+                          <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                        ) : (
+                          <RotateCcw className="mr-1.5 h-4 w-4" />
+                        )}
+                        Re-check thread
+                        <kbd className="ml-1.5 rounded border border-white/50 px-1 text-[10px] font-semibold">R</kbd>
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="h-10 border-amber-300 bg-white px-3"
+                        disabled={recheckClearBusy || recheckBusy}
+                        onClick={(e) => {
+                          e.currentTarget.blur();
+                          void clearRecheck();
+                        }}
+                        onKeyDown={keysMeanCheck}
+                      >
+                        New part
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 {bypass && (
                   <div className="space-y-1">
                     <Label htmlFor="job-number">
@@ -1451,14 +1647,23 @@ export default function Home() {
                 </div>
 
                 <div className="border-t border-slate-200 pt-4">
-                  {resultsBlock(liveView, isInspecting, inspectError, 'results', 'Run CHECK to see results.', bypass)}
+                  {resultsBlock(
+                    liveView,
+                    isInspecting || recheckBusy,
+                    inspectError,
+                    'results',
+                    'Run CHECK to see results.',
+                    bypass,
+                    isInspecting
+                  )}
                 </div>
 
                 <p className={`text-sm ${herculesLine.tone}`} data-testid="hercules-line">
                   {herculesLine.text}
                 </p>
 
-                <div className="mt-auto space-y-3">
+                {/* Sticky so the CHECK button stays on screen however tall the results get. */}
+                <div className="sticky bottom-0 z-10 -mx-4 -mb-4 mt-auto space-y-2 bg-white px-4 pb-4 pt-2">
                   {bypass && !isInspecting && !canCheck && (
                     <p className="text-center text-xs text-amber-700" data-testid="check-hint">
                       {!job ? 'Enter the job number to enable CHECK.' : 'Thread camera is not live.'}
@@ -1483,6 +1688,11 @@ export default function Home() {
                       </>
                     )}
                   </Button>
+                  {recheck && (
+                    <p className="text-center text-xs font-medium text-amber-700" data-testid="check-new-part-hint">
+                      CHECK reads a new {bypass ? 'job number' : '2D code'} (new part)
+                    </p>
+                  )}
                 </div>
               </div>
             </SidePanel>

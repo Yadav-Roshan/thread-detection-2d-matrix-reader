@@ -35,3 +35,9 @@ UPDATING TO A NEW VERSION
 
 TEACHING THE STATION A FALSE "THREAD PRESENT" SCENE
   Save the borescope frame (save button on the feed) into data\Reject and retrain the model.
+
+THREAD RE-CHECK (2D CODE ALREADY READ, THREAD NOK)
+  After a thread NOK the part number is kept and an amber "Thread re-check pending" card appears.
+  Re-check thread (or key R) checks only the thread again - the 2D code is not read again.
+  Hercules: just send threadpresence again. Each attempt has its own PDF ("Attempt 2 (thread re-check)").
+  New part (or CHECK / scanjobno / a new job number) drops the kept part.

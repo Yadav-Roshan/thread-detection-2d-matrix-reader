@@ -76,7 +76,7 @@ class ReportWriter:
     # ------------------------------------------------------------ writing
     def write(self, *, timestamp: datetime, operator: str, mode: str, overall: str,
               decoded_number: Optional[str], code_result: dict, thread_result: dict,
-              code_image: Optional[np.ndarray], thread_image: Optional[np.ndarray]) -> str:
+              code_image: Optional[np.ndarray], thread_image: Optional[np.ndarray], attempt: int = 1) -> str:
         folder = self.root / timestamp.strftime("%Y") / timestamp.strftime("%m") / timestamp.strftime("%d") / overall
         folder.mkdir(parents=True, exist_ok=True)
         base = f"{_safe_part(decoded_number)}_{timestamp.strftime('%H%M%S')}"
@@ -105,7 +105,8 @@ class ReportWriter:
         info = Table([
             ["JOB NUMBER:" if code_result.get("format") == "Job number (manual)" else "PART NUMBER (2D):", decoded_number or UNREAD, "VERDICT:", "GO" if overall == "GO" else "NO-GO"],
             ["OPERATOR:", operator or "-", "MODE:", mode.upper()],
-            ["DATE:", timestamp.strftime("%Y-%m-%d %H:%M:%S"), "", ""],
+            ["DATE:", timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+             "ATTEMPT:", f"{attempt} (thread re-check)" if attempt > 1 else "1"],
         ], colWidths=[1.45 * inch, 2.45 * inch, 0.95 * inch, 2.45 * inch], hAlign="CENTER")
         info.setStyle(TableStyle([("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
                                   ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),

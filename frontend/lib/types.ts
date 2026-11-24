@@ -45,6 +45,11 @@ export type InspectionResult = {
   report_id?: string | null;
   report_url?: string | null;
   job_number_cleared?: boolean;
+  /** 1 = first check, 2+ = thread re-check of the same part. */
+  attempt?: number | null;
+  recheck?: boolean;
+  /** This result left the part waiting for a thread re-check. */
+  recheck_pending?: boolean;
   elapsed_ms?: number | null;
 };
 
@@ -95,4 +100,12 @@ export type HerculesStatus = {
 };
 
 /** Persisted station flag: bypass the 2D reader and use an operator-entered job number. */
-export type StationMode = { bypass_code_reader: boolean; job_number: string | null };
+export type RecheckInfo = {
+  part: string;
+  source: '2d' | 'job' | string;
+  attempts: number;
+  last_state: 'ABSENT' | 'NOT_VISIBLE' | 'ERROR' | string;
+  since?: string | null;
+};
+
+export type StationMode = { bypass_code_reader: boolean; job_number: string | null; recheck?: RecheckInfo | null };

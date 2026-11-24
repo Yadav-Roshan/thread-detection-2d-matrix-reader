@@ -1,6 +1,6 @@
 [project]
 name = "thread-detection-2d-matrix-read"
-version = "1.3.0"
+version = "1.4.0"
 description = "2D Matrix Reader & Thread Presence Inspection station (FastAPI + OpenCV + Next.js)"
 requires-python = ">=3.11"
 dependencies = [

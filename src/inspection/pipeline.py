@@ -43,20 +43,37 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image
 
 
+def _fit_scale(text: str, font: int, thickness: int, max_w: int, max_h: int) -> float:
+    """Largest font scale whose rendered text fits inside max_w x max_h."""
+    (w1, h1), base1 = cv2.getTextSize(text, font, 1.0, thickness)
+    return max(0.5, min(max_w / max(w1, 1), max_h / max(h1 + base1, 1)))
+
+
 def annotate_code(image: np.ndarray, roi, outcome: CodeOutcome) -> np.ndarray:
-    """Full-frame annotated image (same pixel size as input so the UI can overlay ROIs)."""
+    """Full-frame annotated image (same pixel size as input so the UI can overlay ROIs), with the decoded
+    number in a large full-width banner (green = read, red = not read) that stays legible when the image
+    is shown small on the operator screen or in the PDF."""
     vis = _ensure_bgr(image).copy()
+    h, w = vis.shape[:2]
     colour = GREEN if outcome.passed else RED
     box = outcome.roi if outcome.passed and outcome.roi else roi
-    full = (0, 0, vis.shape[1], vis.shape[0])
-    if box and tuple(box) != full:
-        x, y, w, h = box
-        cv2.rectangle(vis, (x, y), (x + w, y + h), colour, 3)
+    if box and tuple(box) != (0, 0, w, h):
+        x, y, bw, bh = box
+        cv2.rectangle(vis, (x, y), (x + bw, y + bh), colour, max(3, w // 320))
     label = outcome.text if outcome.passed else "2D CODE NOT READ"
-    scale = max(0.6, vis.shape[1] / 1280 * 0.9)
-    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, 2)
-    cv2.rectangle(vis, (0, vis.shape[0] - th - 24), (tw + 24, vis.shape[0]), (20, 20, 20), -1)
-    cv2.putText(vis, label, (12, vis.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, scale, colour, 2, cv2.LINE_AA)
+    font, thickness = cv2.FONT_HERSHEY_DUPLEX, max(2, w // 400)
+    band_h = max(40, int(h * 0.14))                       # ~100 px on a 1280x720 frame
+    pad = int(band_h * 0.18)
+    scale = min(_fit_scale(label, font, thickness, int(w * 0.96), band_h - 2 * pad), 3.2)
+    (tw, th), base = cv2.getTextSize(label, font, scale, thickness)
+    top = h - band_h
+    overlay = vis.copy()
+    cv2.rectangle(overlay, (0, top), (w, h), colour, -1)
+    vis = cv2.addWeighted(overlay, 0.88, vis, 0.12, 0)    # solid, slightly translucent banner
+    tx = (w - tw) // 2
+    ty = top + (band_h + th) // 2 - base // 2
+    cv2.putText(vis, label, (tx + 2, ty + 2), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(vis, label, (tx, ty), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
     return vis
 
 

@@ -150,8 +150,14 @@ def test_hercules_full_protocol_over_tcp(client, tmp_path, monkeypatch):
         assert conn.ask("threadpresence") == "threadnok"
         assert conn.ask("hello") == "error"
 
-        # thread check without a preceding scan -> report marked UNREAD, NO-GO
+        # after the NOK the part is kept: threadpresence again = thread re-check of the same part (GO)
         frames["thread"] = cv2.imread(str(THREAD))
+        assert conn.ask("threadpresence") == "threadok"
+        recheck = client.get("/api/hercules/status").json()["last_event"]["result"]
+        assert recheck["decoded_number"] == EXPECTED and recheck["attempt"] == 2
+        assert f"/GO/{EXPECTED}_" in "/" + recheck["report_id"]
+
+        # thread check with no scan and nothing pending -> report marked UNREAD, NO-GO
         assert conn.ask("threadpresence") == "threadok"
         assert "/NO_GO/UNREAD_" in client.get("/api/hercules/status").json()["last_event"]["result"]["report_id"]
 

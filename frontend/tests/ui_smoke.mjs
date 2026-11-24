@@ -82,13 +82,26 @@ const manualResult = (mode, job) => result(mode, {
   job_number_cleared: true,
 });
 
+const threadAbsent = { passed: false, state: 'ABSENT', confidence: 0.1, message: 'No thread ridges', evidence: {} };
+/** Thread-only re-check of the stored part: no code image, attempt number, pending flag. */
+const recheckResult = (attempt, pass, mode = 'online') => result(mode, {
+  overall_result: pass ? 'GO' : 'NO_GO',
+  thread_result: pass ? threadPresent : threadAbsent,
+  code_result: { ...codeOk, message: 'Part number from the earlier 2D read' },
+  code_image: null,
+  attempt,
+  recheck: true,
+  recheck_pending: !pass,
+});
+
 const state = {
   active: { code: 0, thread: null },
   rois: { code: { x: 100, y: 80, width: 400, height: 300 }, thread: null },
   onlineCalls: 0,
   offlineCalls: 0,
   posted: { jobs: [], inspect: [] },
-  station: { bypass_code_reader: false, job_number: null },
+  station: { bypass_code_reader: false, job_number: null, recheck: null },
+  recheckCalls: 0,
   reportDir: 'D:\\Reports\\CamShaft',
   resultDir: 'C:\\CamShaft\\result_images',
   hercules: {
@@ -122,7 +135,7 @@ async function handleApi(route) {
   if (path === '/api/station/bypass') {
     const b = body();
     if (b.password !== 'admin123') return json({ detail: 'Invalid password' }, 403);
-    state.station = { bypass_code_reader: !!b.enabled, job_number: null };
+    state.station = { bypass_code_reader: !!b.enabled, job_number: null, recheck: null };
     return json(state.station);
   }
   if (path === '/api/station/job') {
@@ -130,8 +143,25 @@ async function handleApi(route) {
     state.posted.jobs.push(b.job_number);
     if (!state.station.bypass_code_reader) return json({ detail: 'Bypass is OFF' }, 400);
     if (!/^[A-Za-z0-9\-_./]{0,64}$/.test(b.job_number)) return json({ detail: 'Job number may only contain letters, digits, - _ . /' }, 400);
-    state.station = { ...state.station, job_number: b.job_number || null };
+    state.station = { ...state.station, job_number: b.job_number || null, recheck: null };
     return json(state.station);
+  }
+  if (path === '/api/station/recheck/clear') {
+    state.posted.recheckClear = (state.posted.recheckClear || 0) + 1;
+    state.station = { ...state.station, recheck: null };
+    return json(state.station);
+  }
+  if (path === '/api/inspect/recheck') {
+    state.recheckCalls += 1;
+    state.posted.recheck = body();
+    if (!state.station.recheck) return json({ detail: 'No part waiting for a thread re-check' }, 400);
+    const attempt = state.station.recheck.attempts + 1;
+    if (state.recheckCalls === 1) {
+      state.station = { ...state.station, recheck: { ...state.station.recheck, attempts: attempt, last_state: 'ABSENT' } };
+      return json(recheckResult(attempt, false));
+    }
+    state.station = { ...state.station, recheck: null };
+    return json(recheckResult(attempt, true));
   }
   if (path === '/api/inspect') {
     const b = body();
@@ -142,6 +172,7 @@ async function handleApi(route) {
       return json(manualResult('online', b.job_number));
     }
     state.onlineCalls += 1;
+    state.station = { ...state.station, recheck: null }; // a normal CHECK starts a new part
     if (state.onlineCalls === 1) return json({ detail: 'Thread camera is not connected' }, 503);
     return json(result('online'));
   }
@@ -264,6 +295,90 @@ try {
   await page.getByText('Thread not visible — move the camera closer / remove obstruction').waitFor();
   await shot(page, '2-hercules-nogo');
 
+  // ---- Thread re-check (keep the part number, check the thread again)
+  const recheckCard = page.getByTestId('recheck-card');
+  check((await recheckCard.count()) === 0, 'no re-check card before the server reports one');
+  state.station = { ...state.station, recheck: { part: DECODED, source: '2d', attempts: 1, last_state: 'NOT_VISIBLE', since: '2026-11-01T13:20:05Z' } };
+  await recheckCard.getByText('Thread re-check pending').waitFor(); // from the /api/station/mode poll
+  await recheckCard.getByText(DECODED).waitFor();
+  await page.getByTestId('recheck-chip').getByText('Attempt 1 · NOT VISIBLE').waitFor();
+  await recheckCard.getByText(/send threadpresence again/).waitFor();
+  await page.getByTestId('check-new-part-hint').getByText('CHECK reads a new 2D code (new part)').waitFor();
+  check((await checkBtn.innerText()).trim() === 'CHECK', 'CHECK label must stay CHECK while a re-check is pending');
+
+  await recheckCard.getByRole('button', { name: 'Re-check thread' }).click();
+  await page.getByTestId('results').getByText(`${DECODED} (kept from earlier read)`).waitFor();
+  await page.getByTestId('results-attempt').getByText('Attempt 2').waitFor();
+  await page.getByTestId('results-attempt').getByText('Re-check #1').waitFor();
+  await overlay.getByText(/Thread absent · Attempt 2 · Re-check available/i).waitFor();
+  check(state.posted.recheck && 'operator' in state.posted.recheck, 'recheck body must carry operator');
+  await page.getByTestId('feed-code').locator('img[src^="data:image/jpeg"]').waitFor(); // earlier code image kept
+  await page.getByTestId('recheck-chip').getByText('Attempt 2 · ABSENT').waitFor();
+  const focusOnRecheck = () => page.evaluate(() => document.activeElement?.tagName === 'BUTTON' && !!document.activeElement.textContent?.includes('Re-check thread'));
+  await page.waitForTimeout(200);
+  check(!(await focusOnRecheck()), 'focus must NOT be on Re-check after a NOK result');
+
+  // The green CHECK button stays fully visible while the card is shown.
+  for (const vp of [{ width: 1600, height: 900 }, { width: 1366, height: 768 }]) {
+    await page.setViewportSize(vp);
+    await page.waitForTimeout(200);
+    const b = await checkBtn.boundingBox();
+    check(b && b.y >= 0 && b.y + b.height <= vp.height && b.x >= 0 && b.x + b.width <= vp.width,
+      `CHECK not fully visible at ${vp.width}x${vp.height}: ${JSON.stringify(b)}`);
+    const chip = await page.getByTestId('recheck-chip').evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const card = el.closest('[data-testid="recheck-card"]').getBoundingClientRect();
+      return { sw: el.scrollWidth, cw: el.clientWidth, inside: r.left >= card.left && r.right <= card.right, text: el.textContent };
+    });
+    check(chip.sw <= chip.cw && chip.inside && chip.text.includes('Attempt 2'),
+      `re-check chip truncated at ${vp.width}x${vp.height}: ${JSON.stringify(chip)}`);
+    await shot(page, `2c-recheck-pending-${vp.width}x${vp.height}`);
+  }
+  await page.setViewportSize({ width: 1600, height: 1000 });
+
+  // Enter while a re-check is pending = CHECK (new part), never a re-check — even with focus on the Re-check button.
+  const inspectsBefore = state.posted.inspect.length;
+  const rechecksBefore = state.recheckCalls;
+  await recheckCard.getByRole('button', { name: 'Re-check thread' }).focus();
+  await page.keyboard.press('Enter');
+  await until(() => state.posted.inspect.length === inspectsBefore + 1, 'Enter → POST /api/inspect');
+  check(state.recheckCalls === rechecksBefore, 'Enter must never POST /api/inspect/recheck');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="recheck-card"]'));
+  await page.locator('h1').click();
+  await page.keyboard.press(' ');
+  await until(() => state.posted.inspect.length === inspectsBefore + 2, 'Space → POST /api/inspect');
+  check(state.recheckCalls === rechecksBefore, 'Space must never POST /api/inspect/recheck');
+
+  // Card back (server still holds the part) for the New part step.
+  state.station = { ...state.station, recheck: { part: DECODED, source: '2d', attempts: 2, last_state: 'ABSENT', since: '2026-11-01T13:20:30Z' } };
+  await page.getByTestId('recheck-chip').getByText('Attempt 2 · ABSENT').waitFor();
+
+  // New part clears the pending re-check.
+  await recheckCard.getByRole('button', { name: 'New part' }).click();
+  await until(() => state.posted.recheckClear === 1, 'POST /api/station/recheck/clear');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="recheck-card"]'));
+  check((await page.getByTestId('check-new-part-hint').count()) === 0, 'CHECK hint gone after New part');
+
+  // Hercules threadpresence re-check renders the attempt; R shortcut re-checks manually.
+  state.station = { ...state.station, recheck: { part: DECODED, source: '2d', attempts: 2, last_state: 'NOT_VISIBLE', since: '2026-11-01T13:21:00Z' } };
+  state.hercules = {
+    ...state.hercules,
+    last_event: { seq: 6, kind: 'thread', message: 'threadpresence', reply: 'threadnok', timestamp: '2026-11-01T13:21:00Z',
+      result: result('hercules', { overall_result: 'NO_GO', thread_result: threadNotVisible, code_image: null, attempt: 2, recheck: true, recheck_pending: true }) },
+  };
+  await overlay.getByText(/Attempt 2 · Re-check available/i).waitFor();
+  await page.getByTestId('results').getByText(`${DECODED} (kept from earlier read)`).waitFor();
+  await page.getByTestId('recheck-chip').getByText('Attempt 2 · NOT VISIBLE').waitFor();
+  check(!(await focusOnRecheck()), 'focus must NOT be on Re-check after a Hercules NOK');
+  await page.locator('h1').click();
+  await page.keyboard.press('r');
+  await overlay.getByText('GO', { exact: true }).waitFor();
+  await overlay.getByText(/Attempt 3/i).waitFor();
+  check(state.recheckCalls === 2, 'R shortcut should POST /api/inspect/recheck');
+  await page.getByTestId('results-attempt').getByText('Attempt 3').waitFor();
+  await page.waitForFunction(() => !document.querySelector('[data-testid="recheck-card"]'));
+  await page.getByTestId('last-part').getByText(/Attempt 3/).waitFor();
+
   // ---- Bypass 2D reader (job number entered by the operator)
   const bypassSwitch = page.getByRole('switch', { name: 'Bypass 2D reader' });
   check((await bypassSwitch.getAttribute('aria-checked')) === 'false', 'bypass should load OFF from /api/station/mode');
@@ -321,7 +436,7 @@ try {
   state.station = { ...state.station, job_number: null };
   state.hercules = {
     ...state.hercules,
-    last_event: { seq: 6, kind: 'thread', message: 'threadpresence', reply: 'threadok', timestamp: '2026-11-01T13:30:00Z', result: manualResult('hercules', 'JOB-43') },
+    last_event: { seq: 8, kind: 'thread', message: 'threadpresence', reply: 'threadok', timestamp: '2026-11-01T13:30:00Z', result: manualResult('hercules', 'JOB-43') },
   };
   await page.getByTestId('results').getByText('Job number: JOB-43 (manual)').waitFor();
   await page.waitForFunction(() => document.querySelector('#job-number')?.value === '');
