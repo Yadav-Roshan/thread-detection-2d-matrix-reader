@@ -44,36 +44,63 @@ def _ensure_bgr(image: np.ndarray) -> np.ndarray:
 
 
 def _fit_scale(text: str, font: int, thickness: int, max_w: int, max_h: int) -> float:
-    """Largest font scale whose rendered text fits inside max_w x max_h."""
+    """Largest font scale whose rendered text fits inside max_w x max_h (no artificial floor or cap)."""
     (w1, h1), base1 = cv2.getTextSize(text, font, 1.0, thickness)
-    return max(0.5, min(max_w / max(w1, 1), max_h / max(h1 + base1, 1)))
+    return max(0.1, min(max_w / max(w1, 1), max_h / max(h1 + base1, 1)))
+
+
+def _banner_layout(label: str, font: int, thickness: int, w: int, h: int) -> tuple[list[str], float, int]:
+    """(lines, scale, band height): one line in a band of 14% of the height, or - when the text is limited by
+    the image width (long codes on narrow / small frames) - two lines in a taller band (22%)."""
+    max_w = int(w * 0.94) - 2 * (thickness + 2)           # room for the shadow at both ends
+    band1 = max(40, int(h * 0.14))
+    one = _fit_scale(label, font, thickness, max_w, band1 - 2 * int(band1 * 0.15))
+    if len(label) < 10:
+        return [label], one, band1
+    cut = len(label) // 2
+    if " " in label:                                      # prefer a word break near the middle
+        cut = min((i for i, c in enumerate(label) if c == " "), key=lambda i: abs(i - cut))
+    lines = [label[:cut].strip(), label[cut:].strip()]
+    band2 = max(60, int(h * 0.22))
+    line_h = int((band2 - 2 * int(band2 * 0.10)) * 0.45)
+    two = min(_fit_scale(line, font, thickness, max_w, line_h) for line in lines)
+    return (lines, two, band2) if two > one * 1.2 else ([label], one, band1)
 
 
 def annotate_code(image: np.ndarray, roi, outcome: CodeOutcome) -> np.ndarray:
     """Full-frame annotated image (same pixel size as input so the UI can overlay ROIs), with the decoded
     number in a large full-width banner (green = read, red = not read) that stays legible when the image
-    is shown small on the operator screen or in the PDF."""
+    is shown small on the operator screen or in the PDF. Text size scales with the image (no fixed cap),
+    long codes wrap to two lines on narrow frames, and the banner moves to the top when the code ROI sits
+    in the bottom band so it never hides the code."""
     vis = _ensure_bgr(image).copy()
     h, w = vis.shape[:2]
     colour = GREEN if outcome.passed else RED
     box = outcome.roi if outcome.passed and outcome.roi else roi
-    if box and tuple(box) != (0, 0, w, h):
+    show_box = bool(box) and tuple(box) != (0, 0, w, h)
+    label = outcome.text if outcome.passed else "2D CODE NOT READ"
+    font, thickness = cv2.FONT_HERSHEY_DUPLEX, max(2, min(w, h) // 300)
+    lines, scale, band_h = _banner_layout(label, font, thickness, w, h)
+    top = h - band_h
+    if show_box and box[1] + box[3] > top and box[1] >= band_h:
+        top = 0                                           # ROI in the bottom band: banner at the top
+    overlay = vis.copy()
+    cv2.rectangle(overlay, (0, top), (w, top + band_h), colour, -1)
+    vis = cv2.addWeighted(overlay, 0.88, vis, 0.12, 0)    # solid, slightly translucent banner
+    if show_box:
         x, y, bw, bh = box
         cv2.rectangle(vis, (x, y), (x + bw, y + bh), colour, max(3, w // 320))
-    label = outcome.text if outcome.passed else "2D CODE NOT READ"
-    font, thickness = cv2.FONT_HERSHEY_DUPLEX, max(2, w // 400)
-    band_h = max(40, int(h * 0.14))                       # ~100 px on a 1280x720 frame
-    pad = int(band_h * 0.18)
-    scale = min(_fit_scale(label, font, thickness, int(w * 0.96), band_h - 2 * pad), 3.2)
-    (tw, th), base = cv2.getTextSize(label, font, scale, thickness)
-    top = h - band_h
-    overlay = vis.copy()
-    cv2.rectangle(overlay, (0, top), (w, h), colour, -1)
-    vis = cv2.addWeighted(overlay, 0.88, vis, 0.12, 0)    # solid, slightly translucent banner
-    tx = (w - tw) // 2
-    ty = top + (band_h + th) // 2 - base // 2
-    cv2.putText(vis, label, (tx + 2, ty + 2), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
-    cv2.putText(vis, label, (tx, ty), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    sizes = [cv2.getTextSize(line, font, scale, thickness) for line in lines]
+    line_h = max(th + base for (_, th), base in sizes)
+    gap = int(line_h * 0.15) if len(lines) > 1 else 0
+    block = line_h * len(lines) + gap * (len(lines) - 1)
+    y0 = top + (band_h - block) // 2
+    for i, (line, ((tw, th), base)) in enumerate(zip(lines, sizes)):
+        tx = (w - tw) // 2
+        ty = y0 + i * (line_h + gap) + th
+        shadow = max(1, thickness // 2 + 1)
+        cv2.putText(vis, line, (tx + shadow, ty + shadow), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+        cv2.putText(vis, line, (tx, ty), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
     return vis
 
 

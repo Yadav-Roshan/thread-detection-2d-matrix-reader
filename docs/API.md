@@ -129,7 +129,11 @@ Job number rules: 1–64 characters, letters, digits, `-`, `_`, `.`, `/` (trimme
 
 **Hercules in bypass mode:** `isready` → ready when the thread camera is live; `scanjobno` → replies with the
 entered job number (or `scan_fail_reply`, default `noread`, if none is entered); `threadpresence` → thread check,
-PDF filed under the job number, job number cleared. Hercules `scan` events carry the same manual `code_result`
+PDF filed under **the job number Hercules was told at `scanjobno`** (after a `noread` the cycle is unidentified:
+NO-GO, `threadnok`, even if a number is typed later), and that job number is cleared. A number typed after the
+scan is kept for the next part. Without a scan, `threadpresence` uses the typed number directly.
+Job numbers may contain letters, digits and `- _ . /`; `UNREAD` is reserved. In report file names every
+character other than letters, digits and `-` is written as `~XX` (hex), so `A/B`, `A.B` and `A-B` never collide. Hercules `scan` events carry the same manual `code_result`
 and `code_image: null`.
 
 Offline test (SETUP) is unchanged — it always reads the 2D code from the uploaded image.
@@ -146,7 +150,11 @@ identity is known (2D code read, or job number in bypass mode), the station keep
 
 The pending re-check is **cleared** when: the thread check passes (GO); a new part starts — Hercules
 `scanjobno`, a normal CHECK (`POST /api/inspect`), a new job number typed in bypass mode; the operator presses
-**New part** (`POST /api/station/recheck/clear`); or bypass is toggled.
+**New part** (`POST /api/station/recheck/clear`); bypass is toggled; or it **expires** — no check for
+`RECHECK_TIMEOUT_MIN` minutes (default 15, `.env`; 0 = never). A normal CHECK and New part also drop an
+unpaired Hercules `scanjobno` result, so a later `threadpresence` can never be filed under an old scan.
+A camera or processing error is not counted as an attempt; the part stays kept with `last_state: "ERROR"`.
+All of this is serialised with the inspections, so UI and Hercules commands can't interleave on the part.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -157,7 +165,8 @@ The pending re-check is **cleared** when: the thread check passes (GO); a new pa
 ```json
 { "bypass_code_reader": false, "job_number": null,
   "recheck": { "part": "005715051079230AP666711026002315", "source": "2d" | "job",
-               "attempts": 1, "last_state": "ABSENT" | "NOT_VISIBLE" | "ERROR", "since": "ISO-8601" } | null }
+               "attempts": 1, "last_state": "ABSENT" | "NOT_VISIBLE" | "ERROR", "since": "ISO-8601",
+               "expires_in_s": 897 | null } | null }
 ```
 `InspectionResult` (and Hercules `thread` event results) gain:
 `"attempt": 1` (1 = first check, 2+ = re-check), `"recheck": true|false`, `"recheck_pending": true|false`
@@ -183,7 +192,9 @@ The pending re-check is **cleared** when: the thread check passes (GO); a new pa
 }
 ```
 Flow: Hercules `isready` → `readyyes` (both cameras live) / `readyno`; `scanjobno` → decoded number / `noread`;
-`threadpresence` → `threadok` / `threadnok` and a PDF report combining the last scanned number with the thread result.
+`threadpresence` → PDF report for the part (last scan, else the part kept for a re-check) and the reply follows
+the **verdict**: `threadok` only for GO (part identified AND thread present); `threadnok` for any NO-GO, including
+a thread check for a part the station could not identify (UNREAD).
 
 `HerculesStatus`:
 ```json

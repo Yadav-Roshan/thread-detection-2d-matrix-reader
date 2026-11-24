@@ -1,8 +1,8 @@
 # PyInstaller Windows PE version resource.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 4, 0, 0),
-    prodvers=(1, 4, 0, 0),
+    filevers=(1, 4, 1, 0),
+    prodvers=(1, 4, 1, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'IAGS'),
             StringStruct(u'FileDescription', u'CamShaft 2D Matrix & Thread Inspection'),
-            StringStruct(u'FileVersion', u'1.4.0.0'),
+            StringStruct(u'FileVersion', u'1.4.1.0'),
             StringStruct(u'InternalName', u'CamShaft_Inspection_Station'),
             StringStruct(u'LegalCopyright', u''),
             StringStruct(u'OriginalFilename', u'CamShaft_Inspection_Station.exe'),
             StringStruct(u'ProductName', u'CamShaft 2D Matrix & Thread Inspection'),
-            StringStruct(u'ProductVersion', u'1.4.0.0'),
+            StringStruct(u'ProductVersion', u'1.4.1.0'),
           ]
         )
       ]

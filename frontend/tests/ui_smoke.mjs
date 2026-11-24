@@ -169,6 +169,10 @@ async function handleApi(route) {
     if (state.station.bypass_code_reader) {
       if (!b.job_number) return json({ detail: 'Enter the job number' }, 400);
       state.station = { ...state.station, job_number: null };
+      if (b.job_number === 'JOB-NOK') {
+        state.station = { ...state.station, recheck: { part: 'JOB-NOK', source: 'job', attempts: 1, last_state: 'ABSENT', since: '2026-11-01T13:31:00Z', expires_in_s: 900 } };
+        return json({ ...manualResult('online', 'JOB-NOK'), overall_result: 'NO_GO', thread_result: threadAbsent, recheck_pending: true });
+      }
       return json(manualResult('online', b.job_number));
     }
     state.onlineCalls += 1;
@@ -440,6 +444,26 @@ try {
   };
   await page.getByTestId('results').getByText('Job number: JOB-43 (manual)').waitFor();
   await page.waitForFunction(() => document.querySelector('#job-number')?.value === '');
+
+  // R in bypass mode (review HIGH-1): after a NOK the focus leaves the job box, so R re-checks the kept job
+  // number instead of typing "r" into the box (which would start a bogus new part).
+  await jobBox.fill('JOB-NOK');
+  await until(() => state.station.job_number === 'JOB-NOK', 'job JOB-NOK synced to server');
+  await jobBox.press('Enter');                                   // CHECK from inside the job box
+  const bypassCard = page.getByTestId('recheck-card');
+  await bypassCard.getByText('JOB-NOK').waitFor();
+  await page.getByTestId('recheck-keys').getByText(/kept 15 min/).waitFor();
+  await page.waitForFunction(() => document.activeElement?.id !== 'job-number');
+  await shot(page, '2d-bypass-recheck-pending');
+  const jobsBeforeR = state.posted.jobs.length;
+  const rechecksBeforeR = state.recheckCalls;
+  await page.keyboard.press('r');
+  await until(() => state.recheckCalls === rechecksBeforeR + 1, 'R must POST /api/inspect/recheck in bypass mode');
+  await page.waitForTimeout(500);
+  check(state.posted.jobs.length === jobsBeforeR, 'R must not type into the job box / POST a job number');
+  check((await jobBox.inputValue()) === '', 'job box stays empty after R');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="recheck-card"]'));
+  await page.waitForFunction(() => document.activeElement?.id === 'job-number');  // GO: ready for the next part
 
   // Toggle OFF restores the 2D code feed.
   await bypassSwitch.click();

@@ -34,9 +34,30 @@ _STATE_TEXT = {"PRESENT": "THREAD PRESENT", "ABSENT": "THREAD ABSENT", "NOT_VISI
 
 
 def _safe_part(part: Optional[str]) -> str:
+    """Reversible, file-name-safe form of a part / job number: letters, digits and '-' are kept, every other
+    character becomes ~XX (hex), so "A/B", "A.B" and "A-B" never share a file name or a lookup.
+    A real part literally named UNREAD is escaped too, so it can't be mistaken for an unread code."""
     if not part:
         return UNREAD
-    return re.sub(r"[^A-Za-z0-9\-]", "-", part)[:80] or UNREAD
+    out = "".join(c if (c.isascii() and c.isalnum()) or c == "-" else
+                  "".join(f"~{b:02X}" for b in c.encode("utf-8")) for c in part)
+    if out.upper() == UNREAD:
+        out = f"~{ord(out[0]):02X}{out[1:]}"
+    return out[:180]
+
+
+def _part_from_name(name: str) -> Optional[str]:
+    """Inverse of _safe_part (None for UNREAD). Old reports (before v1.4.1) have no ~ and are returned as-is."""
+    if name == UNREAD:
+        return None
+    if "~" not in name:
+        return name
+    try:
+        raw = re.sub(r"~([0-9A-Fa-f]{2})", lambda m: "%" + m.group(1), name.replace("%", "%25"))
+        from urllib.parse import unquote
+        return unquote(raw, errors="strict")
+    except UnicodeDecodeError:
+        return name
 
 
 def _logo(path: Path, max_h: float, max_w: float):
@@ -168,9 +189,8 @@ class ReportWriter:
     def _record(report_id: str, year: str, month: str, day: str, verdict: str, match: re.Match) -> dict:
         t = match["time"]
         ts = datetime(int(year), int(month), int(day), int(t[:2]), int(t[2:4]), int(t[4:]))
-        part = match["part"]
         return {"report_id": report_id, "timestamp": ts.isoformat(),
-                "decoded_number": None if part == UNREAD else part,
+                "decoded_number": _part_from_name(match["part"]), "_file_part": match["part"],
                 "overall_result": verdict, "report_url": f"/api/reports/file/{report_id}"}
 
     def _iter(self):
@@ -199,11 +219,16 @@ class ReportWriter:
         limit = max(1, min(int(limit), 500))
         out = []
         for record in self._iter():
-            out.append(record)
+            out.append(_public(record))
             if len(out) >= limit:
                 break
         return out
 
     def by_part(self, part: str) -> list[dict]:
-        wanted = _safe_part(part.strip())
-        return [r for r in self._iter() if (r["decoded_number"] or UNREAD) == wanted]
+        part = part.strip()
+        wanted = UNREAD if part.upper() == UNREAD else _safe_part(part)
+        return [_public(r) for r in self._iter() if r["_file_part"] == wanted]
+
+
+def _public(record: dict) -> dict:
+    return {k: v for k, v in record.items() if not k.startswith("_")}

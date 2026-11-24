@@ -46,8 +46,9 @@ none), `threadpresence` checks the thread and clears the job number.
 If the 2D code was read (or a job number entered) but the thread check is NOK, the station keeps the part
 number. Checking the thread again does **not** read the 2D code again: Hercules simply sends `threadpresence`
 again, or the operator presses **Re-check thread** (shortcut `R`). Each attempt gets its own PDF with the attempt
-number. The kept part is dropped on GO, when a new part starts (`scanjobno`, CHECK, a new job number) or with
-**New part**. Enter/Space always run a normal CHECK, never a re-check.
+number. The kept part is dropped on GO, when a new part starts (`scanjobno`, CHECK, a new job number), with
+**New part**, or after `RECHECK_TIMEOUT_MIN` minutes without a check (default 15). Enter/Space always run a
+normal CHECK, never a re-check. Camera/processing errors keep the part and don't count as attempts.
 
 ## Hercules (station = TCP server, Hercules = client)
 
@@ -55,7 +56,7 @@ number. The kept part is dropped on GO, when a new part starts (`scanjobno`, CHE
 |---|---|
 | `isready` | `readyyes` (both cameras live) / `readyno` |
 | `scanjobno` | the decoded 2D number / `noread` |
-| `threadpresence` | `threadok` / `threadnok`, and writes the PDF report (last scanned number + thread result) |
+| `threadpresence` | `threadok` only for GO / `threadnok` otherwise (also for an unidentified part), and writes the PDF report (last scanned number, else the part kept for re-check) |
 | anything else | `error` |
 
 All strings, the listen address and the port can be edited in SETUP → Hercules. Default port is 9000.
@@ -67,6 +68,8 @@ PDFs use the same date-wise, verdict-wise layout as cut-mark-station:
 ```
 <report folder>\YYYY\MM\DD\GO|NO_GO\<2D number>_<HHMMSS>.pdf     (UNREAD_<HHMMSS>.pdf if the code wasn't read)
 ```
+Characters other than letters, digits and `-` in a part / job number are written as `~XX` in the file name
+(e.g. `JOB/7` → `JOB~2F7_101500.pdf`), so different numbers never share a file name.
 
 Choose the folder in SETUP → Reports. **Browse…** opens the Windows folder picker on the station PC; you can
 also type a path. The default folder is `reports\pdf`. The logo is `assets\logo.jpeg`.

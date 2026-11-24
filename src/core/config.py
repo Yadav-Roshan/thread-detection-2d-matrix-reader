@@ -63,5 +63,9 @@ CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "720"))
 CODE_CAMERA_INDEX = os.getenv("CODE_CAMERA_INDEX")
 THREAD_CAMERA_INDEX = os.getenv("THREAD_CAMERA_INDEX")
 
+# A part kept for a thread re-check (after a NOK) is dropped after this many minutes without a check,
+# so a re-check can't be filed under a part that has long left the station. 0 = never expire.
+RECHECK_TIMEOUT_MIN = float(os.getenv("RECHECK_TIMEOUT_MIN", "15"))
+
 # SHA-256 of the SETUP password. Same default as cut-mark-station (same client).
 DEFAULT_PASSWORD_HASH = "f01fd40abb0c501e1207cb810d1e1cd9f22df8b1cccf7b071b0d2ae060e12fc6"

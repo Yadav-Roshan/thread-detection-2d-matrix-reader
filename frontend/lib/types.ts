@@ -106,6 +106,8 @@ export type RecheckInfo = {
   attempts: number;
   last_state: 'ABSENT' | 'NOT_VISIBLE' | 'ERROR' | string;
   since?: string | null;
+  /** Seconds until the kept part is dropped (server RECHECK_TIMEOUT_MIN); null = never. */
+  expires_in_s?: number | null;
 };
 
 export type StationMode = { bypass_code_reader: boolean; job_number: string | null; recheck?: RecheckInfo | null };

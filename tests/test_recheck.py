@@ -144,8 +144,8 @@ def test_hercules_threadpresence_again_rechecks_without_scan(client, cams, herc)
     r = last_result(client)
     assert r["decoded_number"] == PART and r["attempt"] == 2 and r["recheck"] is True
     assert mode(client)["recheck"] is None
-    assert herc.ask("threadpresence") == "threadok"       # nothing pending any more: part unknown
-    assert last_result(client)["decoded_number"] is None
+    assert herc.ask("threadpresence") == "threadnok"      # nothing pending any more: part unknown -> NO-GO
+    assert last_result(client)["decoded_number"] is None and last_result(client)["overall_result"] == "NO_GO"
 
 
 def test_hercules_scan_starts_new_part(client, cams, herc):

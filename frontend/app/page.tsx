@@ -491,6 +491,21 @@ export default function Home() {
     window.setTimeout(() => jobInputRef.current?.focus(), 0);
   }, []);
 
+  /** After a result: with a part kept for re-check, take focus OUT of the job box so the R shortcut
+   * re-checks instead of typing "r" (which would start a new part); otherwise focus it for the next part. */
+  const focusAfterResult = useCallback(
+    (recheckPending: boolean) => {
+      if (recheckPending) {
+        window.setTimeout(() => {
+          if (document.activeElement === jobInputRef.current) jobInputRef.current?.blur();
+        }, 0);
+      } else {
+        focusJobInput();
+      }
+    },
+    [focusJobInput]
+  );
+
 
   const cancelJobSync = useCallback(() => {
     if (jobTimerRef.current !== null) {
@@ -511,14 +526,17 @@ export default function Home() {
     setJobNumber(serverJob ?? '');
   }, []);
 
-  /** Thread result arrived (manual CHECK or Hercules): the server cleared the job number. */
-  const clearJobAfterResult = useCallback(() => {
-    cancelJobSync();
-    serverJobRef.current = null;
-    setJobNumber('');
-    setJobError('');
-    focusJobInput();
-  }, [cancelJobSync, focusJobInput]);
+  /** Thread result arrived (manual CHECK or Hercules): the server cleared the job number it used. */
+  const clearJobAfterResult = useCallback(
+    (recheckPending: boolean) => {
+      cancelJobSync();
+      serverJobRef.current = null;
+      setJobNumber('');
+      setJobError('');
+      focusAfterResult(recheckPending);
+    },
+    [cancelJobSync, focusAfterResult]
+  );
 
   const handleJobChange = (value: string) => {
     setJobNumber(value);
@@ -536,8 +554,10 @@ export default function Home() {
     }, 300);
   };
 
+  const recheckPendingRef = useRef(false);
+  recheckPendingRef.current = recheck !== null;
   useEffect(() => {
-    if (bypass && activeTab === 'inspection') focusJobInput();
+    if (bypass && activeTab === 'inspection' && !recheckPendingRef.current) focusJobInput();
   }, [bypass, activeTab, focusJobInput]);
 
   useEffect(() => cancelJobSync, [cancelJobSync]);
@@ -615,7 +635,8 @@ export default function Home() {
           setShowLiveResult(true);
           setInspectError('');
           setRecheck(recheckFromResult(result));
-          clearJobAfterResult();
+          // The server keeps a job number typed after the scan; the next mode poll restores it.
+          clearJobAfterResult(!!result.recheck_pending);
         }
       } catch {
         if (!cancelled) setHerculesStatus(null);
@@ -699,7 +720,7 @@ export default function Home() {
       setLiveView(viewFromResult(data));
       setShowLiveResult(true);
       setRecheck(recheckFromResult(data));
-      if (bypass || data.job_number_cleared) clearJobAfterResult();
+      if (bypass || data.job_number_cleared) clearJobAfterResult(!!data.recheck_pending);
     } catch (e) {
       setInspectError((e as Error).message);
       setLiveView(null);
@@ -720,7 +741,7 @@ export default function Home() {
       setLiveView((prev) => mergeRecheckView(prev, viewFromResult(data)));
       setShowLiveResult(true);
       setRecheck(recheckFromResult(data));
-      if (bypass) focusJobInput();
+      if (bypass) focusAfterResult(!!data.recheck_pending);
     } catch (e) {
       setInspectError((e as Error).message);
       setShowLiveResult(true);
@@ -1556,9 +1577,10 @@ export default function Home() {
                       <span
                         data-testid="recheck-chip"
                         className="shrink-0 whitespace-nowrap rounded-full bg-amber-200 px-2 py-0.5 text-[11px] font-bold uppercase text-amber-900"
-                        title={`Attempt ${recheck.attempts} · ${recheckStateLabel(recheck.last_state)}`}
+                        title={`${recheck.attempts > 0 ? `Attempt ${recheck.attempts}` : 'Not checked yet'} · ${recheckStateLabel(recheck.last_state)}`}
                       >
-                        Attempt {recheck.attempts} · {recheckStateShort(recheck.last_state)}
+                        {recheck.attempts > 0 ? `Attempt ${recheck.attempts}` : 'Not checked'} ·{' '}
+                        {recheckStateShort(recheck.last_state)}
                       </span>
                     </div>
                     <p
@@ -1600,6 +1622,14 @@ export default function Home() {
                         New part
                       </Button>
                     </div>
+                    <p data-testid="recheck-keys" className="text-[11px] leading-snug text-amber-900/80">
+                      <kbd className="rounded border border-amber-400 bg-white px-1 font-semibold">R</kbd> re-check this
+                      part · <kbd className="rounded border border-amber-400 bg-white px-1 font-semibold">Enter</kbd>{' '}
+                      CHECK a new part
+                      {recheck.expires_in_s != null && (
+                        <> · kept {Math.max(1, Math.ceil(recheck.expires_in_s / 60))} min</>
+                      )}
+                    </p>
                   </div>
                 )}
                 {bypass && (

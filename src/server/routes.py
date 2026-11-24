@@ -22,7 +22,7 @@ import re
 
 from dataclasses import dataclass, replace as dc_replace
 
-from src.inspection.pipeline import CodeStep, manual_code_step, overall, run_code_step, run_thread_step, to_data_url
+from src.inspection.pipeline import MANUAL_FORMAT, CodeStep, manual_code_step, overall, run_code_step, run_thread_step, to_data_url
 from src.inspection.thread_classifier import DetectionParams, ThreadClassifier
 from src.outputs.hercules_server import HerculesServer
 from src.outputs.pdf_report import ReportWriter
@@ -36,13 +36,15 @@ class State:
     settings = SettingsStore()
     reports = ReportWriter(lambda: State.settings.get_report_directory())
     hercules = HerculesServer()
-    last_scan: Optional[CodeStep] = None
+    last_scan: Optional[CodeStep] = None   # Hercules: last scanjobno result, paired with the next threadpresence
     job_number: Optional[str] = None       # bypass mode: operator-entered number for the next thread check
-    recheck: Optional["PendingRecheck"] = None  # part whose thread check was NOK; re-check keeps its number   # Hercules: last scanjobno result, paired with next threadpresence
+    recheck: Optional["PendingRecheck"] = None  # part whose thread check was NOK; a re-check keeps its number
     classifier: Optional[ThreadClassifier] = None
     classifier_path: Optional[str] = None
     classifier_lock = threading.Lock()
-    inspect_lock = threading.Lock()
+    # Serialises every inspection AND every change of last_scan / job_number / recheck, so the UI
+    # (FastAPI threadpool) and Hercules (asyncio server) can never interleave on the part identity.
+    inspect_lock = threading.RLock()
     shutting_down = False
 
 
@@ -111,6 +113,8 @@ def _clean_job(value: str) -> Optional[str]:
         return None
     if not _JOB_RE.match(job):
         raise HTTPException(status_code=400, detail="Job number: 1-64 letters, digits, - _ . / only")
+    if job.upper() == "UNREAD":
+        raise HTTPException(status_code=400, detail="'UNREAD' is reserved for parts whose code was not read")
     return job
 
 
@@ -122,17 +126,25 @@ def _bypass() -> bool:
 class PendingRecheck:
     """A part whose identity is known but whose thread check was NOK: the next thread check reuses it."""
     code: CodeStep
-    attempts: int
+    attempts: int            # thread checks done so far for this part
     last_state: str
     since: str
+    touched: float = 0.0     # monotonic time of the last check (expiry)
 
     @property
     def part(self) -> str:
         return self.code.decoded_number or ""
 
     def as_dict(self) -> dict:
-        return {"part": self.part, "source": "job" if self.code.result.get("format") == "Job number (manual)" else "2d",
-                "attempts": self.attempts, "last_state": self.last_state, "since": self.since}
+        timeout = config.RECHECK_TIMEOUT_MIN * 60
+        expires = max(0, int(timeout - (time.monotonic() - self.touched))) if timeout > 0 else None
+        return {"part": self.part, "source": "job" if self.code.result.get("format") == MANUAL_FORMAT else "2d",
+                "attempts": self.attempts, "last_state": self.last_state, "since": self.since,
+                "expires_in_s": expires}
+
+    def expired(self) -> bool:
+        timeout = config.RECHECK_TIMEOUT_MIN * 60
+        return timeout > 0 and time.monotonic() - self.touched > timeout
 
 
 def _clear_recheck(reason: str) -> None:
@@ -141,13 +153,25 @@ def _clear_recheck(reason: str) -> None:
     State.recheck = None
 
 
+def _pending_recheck() -> Optional[PendingRecheck]:
+    """The part waiting for a re-check, dropping it once it has expired. Call with inspect_lock held."""
+    if State.recheck is not None and State.recheck.expired():
+        _clear_recheck(f"expired after {config.RECHECK_TIMEOUT_MIN:g} min")
+    return State.recheck
+
+
+def _identified(code: Optional[CodeStep]) -> bool:
+    return code is not None and bool(code.result.get("passed")) and bool(code.decoded_number)
+
+
 def _note_thread_outcome(code: Optional[CodeStep], passed: bool, state: str, attempt: int) -> bool:
-    """After a thread check: keep the part for a re-check when NOK, clear it on GO. Returns recheck_pending."""
-    if passed or code is None or not code.result.get("passed") or not code.decoded_number:
+    """After a thread check: keep the part for a re-check when NOK, clear it on GO. Returns recheck_pending.
+    Call with inspect_lock held."""
+    if passed or not _identified(code):
         _clear_recheck("thread OK" if passed else "part identity unknown")
         return False
     State.recheck = PendingRecheck(code=code, attempts=attempt, last_state=state,
-                                   since=datetime.now(timezone.utc).isoformat())
+                                   since=datetime.now(timezone.utc).isoformat(), touched=time.monotonic())
     logging.getLogger("station.recheck").info("re-check pending for %s (attempt %d %s)", code.decoded_number, attempt, state)
     return True
 
@@ -159,9 +183,23 @@ def _recheck_code(pending: PendingRecheck) -> CodeStep:
     return dc_replace(pending.code, result=result)
 
 
+def _keep_after_error(code: Optional[CodeStep], attempt: int) -> None:
+    """The thread check could not run (camera / processing error): keep the part so the check can simply be
+    repeated. An error is not a thread check, so the attempt counter does not advance."""
+    if not _identified(code):
+        return
+    if attempt > 1 and State.recheck is not None:
+        State.recheck.last_state = "ERROR"
+        State.recheck.touched = time.monotonic()
+    else:
+        _note_thread_outcome(code, False, "ERROR", 0)
+
+
 def _station_mode() -> dict:
-    return {"bypass_code_reader": _bypass(), "job_number": State.job_number,
-            "recheck": State.recheck.as_dict() if State.recheck else None}
+    with State.inspect_lock:
+        pending = _pending_recheck()
+        return {"bypass_code_reader": _bypass(), "job_number": State.job_number,
+                "recheck": pending.as_dict() if pending else None}
 
 
 # ------------------------------------------------------------------ health
@@ -362,34 +400,52 @@ def _elapsed_ms(start: float) -> int:
 
 def _run_inspection(code_frame: Optional[np.ndarray], thread_frame: np.ndarray, operator: str, mode: str,
                     started: Optional[float] = None, job_number: Optional[str] = None,
-                    recheck: Optional[PendingRecheck] = None) -> dict:
+                    use_recheck: bool = False, new_part: bool = False) -> dict:
     """``started`` = perf_counter() when the inspection began (frame capture for live checks).
     With ``job_number`` the 2D reader is bypassed and the number is used as the part identity.
-    With ``recheck`` only the thread is checked; the stored part identity is reused."""
+    With ``use_recheck`` only the thread is checked and the kept part identity is reused; the kept part is
+    read under the lock, so a "New part" / scan that happened meanwhile is respected.
+    ``new_part`` (a normal CHECK) drops any kept part and any unpaired Hercules scan first."""
     started = started if started is not None else time.perf_counter()
-    attempt = recheck.attempts + 1 if recheck else 1
     with State.inspect_lock:
+        pending = None
+        if use_recheck:
+            pending = _pending_recheck()
+            if pending is None:
+                raise HTTPException(status_code=400, detail="No part waiting for a thread re-check")
+        if new_part:
+            _clear_recheck("new part (CHECK)")
+            State.last_scan = None
+        attempt = pending.attempts + 1 if pending else 1
         try:
-            if recheck:
-                code = _recheck_code(recheck)
+            if pending:
+                code = _recheck_code(pending)
             else:
                 code = manual_code_step(job_number) if job_number else run_code_step(code_frame, _rois_for(code_frame, "code"))
             thread = run_thread_step(thread_frame, _rois_for(thread_frame, "thread"),
                                      get_classifier(), State.settings.get_detection())
         except ValueError as exc:
+            if mode != "offline" and pending:
+                _keep_after_error(pending.code, attempt)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if code.image is not None and not recheck:
+        except Exception:
+            if mode != "offline" and pending:
+                _keep_after_error(pending.code, attempt)
+            raise
+        if code.image is not None and not pending:
             _save_result_image("code", code.image)
         _save_result_image("thread", thread.image)
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, operator, mode, now, attempt)
-        pending = _note_thread_outcome(code, thread.passed, thread.result["state"], attempt) if mode != "offline" else False
+        kept = _note_thread_outcome(code, thread.passed, thread.result["state"], attempt) if mode != "offline" else False
+        if job_number and State.job_number == job_number:
+            State.job_number = None                 # one job number per thread check (a newer one typed meanwhile stays)
     elapsed = _elapsed_ms(started)
     logging.getLogger("station.inspect").info(
         "%s check: part=%s code=%s thread=%s -> %s attempt=%d report=%s time=%dms", mode, code.decoded_number,
         "OK" if code.result["passed"] else "NOREAD", thread.result["state"], overall(code, thread), attempt,
         report_id, elapsed)
-    return _payload(code, thread, operator, mode, now, report_id, elapsed, attempt, pending)
+    return _payload(code, thread, operator, mode, now, report_id, elapsed, attempt, kept)
 
 
 @router.post("/api/inspect")
@@ -402,31 +458,28 @@ def inspect_online(body: InspectRequest) -> dict:
         thread_frame = State.cameras.averaged_frame("thread")
         if thread_frame is None:
             raise HTTPException(status_code=503, detail="thread camera not connected — select it on the feed")
-        _clear_recheck("new part (CHECK)")
-        result = _run_inspection(None, thread_frame, body.operator, "online", started, job_number=job)
-        State.job_number = None                     # one job number per thread check
+        result = _run_inspection(None, thread_frame, body.operator, "online", started, job_number=job, new_part=True)
         return {**result, "job_number_cleared": True}
-    _clear_recheck("new part (CHECK)")
     code_frame = State.cameras.frame("code")
     thread_frame = State.cameras.averaged_frame("thread")  # 3-frame mean for repeatability
     missing = [name for name, frame in (("2D code", code_frame), ("thread", thread_frame)) if frame is None]
-    if missing:
+    if missing:   # nothing is changed (the kept part stays) when a camera is missing
         raise HTTPException(status_code=503,
                             detail=" and ".join(missing) + " camera not connected — select it on the feed")
-    return _run_inspection(code_frame, thread_frame, body.operator, "online", started)
+    return _run_inspection(code_frame, thread_frame, body.operator, "online", started, new_part=True)
 
 
 @router.post("/api/inspect/recheck")
 def inspect_recheck(body: InspectRequest) -> dict:
     """Check the thread again for the part kept after a NOK - the 2D code is not read again."""
     started = time.perf_counter()
-    pending = State.recheck
-    if pending is None:
-        raise HTTPException(status_code=400, detail="No part waiting for a thread re-check")
+    with State.inspect_lock:
+        if _pending_recheck() is None:
+            raise HTTPException(status_code=400, detail="No part waiting for a thread re-check")
     thread_frame = State.cameras.averaged_frame("thread")
     if thread_frame is None:
         raise HTTPException(status_code=503, detail="thread camera not connected — select it on the feed")
-    return _run_inspection(None, thread_frame, body.operator, "online", started, recheck=pending)
+    return _run_inspection(None, thread_frame, body.operator, "online", started, use_recheck=True)
 
 
 def _decode_upload(raw: bytes, name: str) -> np.ndarray:
@@ -456,26 +509,34 @@ def hercules_ready() -> bool:
     return all(State.cameras.frame(role) is not None for role in roles) and State.classifier is not None
 
 
+_NO_JOB = {"passed": False, "text": None, "format": MANUAL_FORMAT,
+           "message": "No job number entered on the station when Hercules asked (scanjobno replied noread)"}
+
+
 def hercules_scan() -> tuple[str, dict]:
     cfg = State.hercules.config
     started = time.perf_counter()
-    _clear_recheck("new part (scanjobno)")
     if _bypass():
-        job = State.job_number
-        State.last_scan = manual_code_step(job) if job else None
+        with State.inspect_lock:
+            _clear_recheck("new part (scanjobno)")
+            job = State.job_number
+            # A noread is remembered too: the next threadpresence then belongs to an UNIDENTIFIED part and is
+            # never filed under a number typed after Hercules was told "noread".
+            State.last_scan = (manual_code_step(job) if job
+                               else CodeStep(result=dict(_NO_JOB), decoded_number=None, image=None))
+            code_result = State.last_scan.result
         result = {"timestamp": datetime.now(timezone.utc).isoformat(), "elapsed_ms": _elapsed_ms(started),
                   "mode": "hercules", "operator": "Hercules", "decoded_number": job,
-                  "code_result": State.last_scan.result if job else
-                  {"passed": False, "text": None, "format": None, "message": "No job number entered on the station"},
-                  "code_image": None}
+                  "code_result": code_result, "code_image": None}
         return (job if job else cfg["scan_fail_reply"]), result
     frame = State.cameras.frame("code")
     if frame is None:
         raise RuntimeError("2D code camera not connected")
     with State.inspect_lock:
+        _clear_recheck("new part (scanjobno)")
         code = run_code_step(frame, _rois_for(frame, "code"))
         _save_result_image("code", code.image)
-    State.last_scan = code
+        State.last_scan = code
     reply = code.decoded_number if code.result["passed"] else cfg["scan_fail_reply"]
     result = {"timestamp": datetime.now(timezone.utc).isoformat(), "elapsed_ms": _elapsed_ms(started),
               "mode": "hercules", "operator": "Hercules",
@@ -485,18 +546,24 @@ def hercules_scan() -> tuple[str, dict]:
 
 
 def _hercules_part() -> tuple[Optional[CodeStep], int]:
-    """Which part a threadpresence belongs to: a fresh scan, else a typed job number (bypass),
-    else the part waiting for a thread re-check. Consumes the fresh scan / typed number."""
+    """Which part a threadpresence belongs to (call with inspect_lock held):
+    1. the last scanjobno result - exactly what Hercules was told, even "noread";
+    2. bypass mode without a scan: the typed job number;
+    3. the part kept for a thread re-check (not expired);
+    4. otherwise unknown (NO-GO, UNREAD, threadnok)."""
     code, State.last_scan = State.last_scan, None
     if code is not None:
+        if _bypass() and code.decoded_number and State.job_number == code.decoded_number:
+            State.job_number = None                     # the scanned job number is used up by this check
         return code, 1
     if _bypass() and State.job_number:
         code = manual_code_step(State.job_number)
-        State.job_number = None
+        State.job_number = None                         # one job number per thread check
         _clear_recheck("new job number")
         return code, 1
-    if State.recheck is not None:
-        return _recheck_code(State.recheck), State.recheck.attempts + 1
+    pending = _pending_recheck()
+    if pending is not None:
+        return _recheck_code(pending), pending.attempts + 1
     return None, 1
 
 
@@ -504,22 +571,22 @@ def hercules_thread() -> tuple[str, dict]:
     cfg = State.hercules.config
     started = time.perf_counter()
     frame = State.cameras.averaged_frame("thread")
-    if frame is None:
-        # Keep a freshly scanned part so threadpresence can simply be sent again once the camera is back.
-        code, attempt = _hercules_part()
-        if code is not None:
-            _note_thread_outcome(code, False, "ERROR", attempt if attempt > 1 else 1)
-        raise RuntimeError("Thread camera not connected")
     with State.inspect_lock:
         code, attempt = _hercules_part()
-        if _bypass():
-            State.job_number = None                     # one job number per thread check
-        thread = run_thread_step(frame, _rois_for(frame, "thread"), get_classifier(), State.settings.get_detection())
+        if frame is None:
+            _keep_after_error(code, attempt)            # threadpresence can simply be sent again
+            raise RuntimeError("Thread camera not connected")
+        try:
+            thread = run_thread_step(frame, _rois_for(frame, "thread"), get_classifier(), State.settings.get_detection())
+        except Exception:
+            _keep_after_error(code, attempt)
+            raise
         _save_result_image("thread", thread.image)
         now = datetime.now().astimezone()
         report_id = _write_report(code, thread, "Hercules", "hercules", now, attempt)
         pending = _note_thread_outcome(code, thread.passed, thread.result["state"], attempt)
-    reply = cfg["thread_ok_reply"] if thread.passed else cfg["thread_nok_reply"]
+    # The reply follows the station verdict: threadok only for a GO (identified part AND thread present).
+    reply = cfg["thread_ok_reply"] if overall(code, thread) == "GO" else cfg["thread_nok_reply"]
     return reply, _payload(code, thread, "Hercules", "hercules", now, report_id, _elapsed_ms(started),
                            attempt, pending)
 
@@ -536,10 +603,11 @@ def station_mode() -> dict:
 def station_bypass(body: BypassRequest) -> dict:
     if not State.settings.check_password(body.password):
         raise HTTPException(status_code=403, detail="Invalid password")
-    State.settings.set_bypass_code_reader(body.enabled)
-    State.job_number = None
-    State.last_scan = None
-    _clear_recheck("bypass toggled")
+    with State.inspect_lock:
+        State.settings.set_bypass_code_reader(body.enabled)
+        State.job_number = None
+        State.last_scan = None
+        _clear_recheck("bypass toggled")
     logging.getLogger("station").info("2D reader bypass %s", "ON" if body.enabled else "OFF")
     return _station_mode()
 
@@ -548,15 +616,19 @@ def station_bypass(body: BypassRequest) -> dict:
 def station_job(body: JobRequest) -> dict:
     if not _bypass():
         raise HTTPException(status_code=400, detail="Job number entry is only used when the 2D reader is bypassed")
-    State.job_number = _clean_job(body.job_number)
-    if State.job_number:
-        _clear_recheck("new job number")
+    job = _clean_job(body.job_number)
+    with State.inspect_lock:
+        if job and job != State.job_number:
+            _clear_recheck("new job number")
+        State.job_number = job
     return _station_mode()
 
 
 @router.post("/api/station/recheck/clear")
 def station_recheck_clear() -> dict:
-    _clear_recheck("operator pressed New part")
+    with State.inspect_lock:
+        _clear_recheck("operator pressed New part")
+        State.last_scan = None                          # an unpaired Hercules scan belongs to the old part too
     return _station_mode()
 
 
@@ -629,7 +701,7 @@ def reports(limit: int = 50) -> list[dict]:
     return State.reports.recent(limit)
 
 
-@router.get("/api/reports/by-part/{decoded_number}")
+@router.get("/api/reports/by-part/{decoded_number:path}")  # job numbers may contain "/"
 def reports_by_part(decoded_number: str) -> list[dict]:
     return State.reports.by_part(decoded_number)
 
